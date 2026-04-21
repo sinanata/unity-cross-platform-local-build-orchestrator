@@ -1,0 +1,73 @@
+{
+    "_comment": "Copy this file to config.local.json (same folder) and fill in real values. config.local.json is gitignored. Both the Windows PC and the MacBook need their own copy — Windows-only fields can be blank on the Mac and vice versa. See docs/CREDENTIALS.md for a step-by-step credential-gathering guide.",
+
+    "productName": "YourGame",
+
+    "unity": {
+        "version": "6000.3.8f1",
+        "windowsEditorPath": "C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.8f1\\Editor\\Unity.exe",
+        "macEditorPath": "/Applications/Unity/Hub/Editor/6000.3.8f1/Unity.app/Contents/MacOS/Unity"
+    },
+
+    "build": {
+        "_comment": "Output binary names used in Unity's -cliBuildPath and referenced by Steam VDFs.",
+        "windowsExeName": "YourGame.exe",
+        "macAppName": "YourGame.app",
+        "aabName": "YourGame.aab"
+    },
+
+    "paths": {
+        "winRepoRoot":     "D:\\UnityProjects\\YourGame",
+        "windowsBuildDir": "D:\\UnityProjects\\YourGameWinBuild",
+        "androidBuildDir": "D:\\UnityProjects\\YourGameAndroidBuild",
+        "macRepoRoot":     "/Users/YOU/Documents/GitHub/YourGame",
+        "macBuildDir":     "/Users/YOU/Documents/YourGameMacOSBuild",
+        "iosBuildDir":     "/Users/YOU/Documents/YourGameiOSBuild"
+    },
+
+    "android": {
+        "_comment": "keystorePath is relative to the project root if not absolute. keyaliasPassword blank = reuse keystorePassword.",
+        "keystorePath": "game.keystore",
+        "keyaliasName": "REPLACE_WITH_KEY_ALIAS",
+        "keystorePassword": "REPLACE_WITH_KEYSTORE_PASSWORD",
+        "keyaliasPassword": ""
+    },
+
+    "steam": {
+        "_comment": "Leave username empty to skip Steam uploads entirely. appId/depotIds come from Steamworks partner dashboard.",
+        "appId": "",
+        "depotIdWindows": "",
+        "depotIdMacOS": "",
+        "username": "",
+        "defaultBranch": "closed_testing",
+        "steamCmdPathWindows": "C:\\steamcmd\\steamcmd.exe",
+        "steamCmdPathMac": "~/Steam/steamcmd.sh"
+    },
+
+    "mac": {
+        "_comment": "runMode=ssh drives the Mac over SSH from Windows; runMode=manual prints the command for you to run yourself. keychainPassword is ONLY read by the Mac-side build_mac.sh — the Windows PC never sees it. It's your macOS login password, needed so codesign can access the signing identity's private key in a headless SSH session (otherwise xcodebuild fails with errSecInternalComponent). Leave empty if you only ever run build_mac.sh from a GUI terminal.",
+        "runMode": "ssh",
+        "sshHost": "YourMac.local",
+        "sshUser": "YOU",
+        "sshKey": "~/.ssh/id_ed25519",
+        "sshPort": 22,
+        "keychainPassword": ""
+    },
+
+    "playStore": {
+        "_comment": "Leave serviceAccountJsonPath empty to skip Play Store upload. Store the JSON outside the repo. track: internal | alpha | beta | production.",
+        "serviceAccountJsonPath": "",
+        "packageName": "com.example.yourgame",
+        "track": "internal"
+    },
+
+    "testFlight": {
+        "_comment": "Leave ascApiKeyId empty to skip TestFlight upload. teamId is your 10-char Apple Developer Team ID. ascApiKeyP8Path must exist on the MAC (Apple only downloads the .p8 once; recommended location is ~/.appstoreconnect/private_keys/).",
+        "ascApiKeyId": "",
+        "ascApiIssuerId": "",
+        "ascApiKeyP8Path": "",
+        "teamId": "",
+        "scheme": "Unity-iPhone",
+        "exportMethod": "app-store-connect"
+    }
+}

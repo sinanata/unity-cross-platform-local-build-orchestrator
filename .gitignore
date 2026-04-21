@@ -1,0 +1,31 @@
+# Local configuration with secrets — never commit.
+Tools/Build/config.local.json
+
+# Build orchestrator logs and Unity batchmode reports.
+Tools/Build/output/
+Tools/Steam/output/
+*.log
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# macOS metadata
+.DS_Store
+
+# Editor junk
+.vscode/
+.idea/
+*.swp
+*~
+
+# Unity-generated artefacts if someone clones this INTO a Unity project.
+# These belong in the project's own .gitignore too, but mirrored here for
+# safety so the standalone repo stays clean.
+Library/
+Temp/
+Obj/
+Logs/
+UserSettings/
+MemoryCaptures/
+Builds/
