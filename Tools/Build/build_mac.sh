@@ -38,6 +38,8 @@ SKIP_IOS="${SKIP_IOS:-false}"
 SKIP_MACOS="${SKIP_MACOS:-false}"
 SKIP_UPLOADS="${SKIP_UPLOADS:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+# No default — empty means "fall back to config.unity.clearCacheBeforeBuild below".
+CLEAR_CACHE="${CLEAR_CACHE-}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -45,11 +47,12 @@ while [ $# -gt 0 ]; do
         --skip-macos)    SKIP_MACOS=true;     shift ;;
         --skip-uploads)  SKIP_UPLOADS=true;   shift ;;
         --dry-run)       DRY_RUN=true;        shift ;;
+        --clear-cache)   CLEAR_CACHE=true;    shift ;;
         --branch)        BRANCH="$2";         shift 2 ;;
         --description)   DESCRIPTION="$2";    shift 2 ;;
         -h|--help)
-            echo "Usage: $0 [--skip-ios] [--skip-macos] [--skip-uploads] [--dry-run] [--branch X] [--description X]"
-            echo "Env: BRANCH, DESCRIPTION, SKIP_IOS, SKIP_MACOS, SKIP_UPLOADS, DRY_RUN"
+            echo "Usage: $0 [--skip-ios] [--skip-macos] [--skip-uploads] [--dry-run] [--clear-cache] [--branch X] [--description X]"
+            echo "Env: BRANCH, DESCRIPTION, SKIP_IOS, SKIP_MACOS, SKIP_UPLOADS, DRY_RUN, CLEAR_CACHE"
             exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -90,6 +93,28 @@ clean_dir() {
         if [ "$DRY_RUN" != "true" ]; then rm -rf "$1"; fi
     fi
     if [ "$DRY_RUN" != "true" ]; then mkdir -p "$1"; fi
+}
+
+# Nuke Unity's Burst AOT + Bee + assembly caches so the next Unity invocation
+# regenerates everything from scratch. Recovery tool for stale-cache issues
+# like NetCode "RpcSystem failed to deserialize RPC ... bits read X did not
+# match expected Y" where server+client disagree on wire format within one
+# process. Expensive (full reimport, +5-15 min) but deterministic.
+clear_unity_cache() {
+    local dirs=(
+        "$REPO_ROOT/Library/BurstCache"
+        "$REPO_ROOT/Library/Bee"
+        "$REPO_ROOT/Library/ScriptAssemblies"
+        "$REPO_ROOT/Temp"
+    )
+    step "Clearing Unity caches ($REPO_ROOT)"
+    warn "Next Unity run will do a full reimport."
+    for d in "${dirs[@]}"; do
+        if [ -d "$d" ]; then
+            info "Removing $d"
+            if [ "$DRY_RUN" != "true" ]; then rm -rf "$d"; fi
+        fi
+    done
 }
 
 # Print a single-line in-place progress update. bash's BUILTIN printf uses
@@ -313,6 +338,11 @@ EXPORT_METHOD="$(cfg '.testFlight.exportMethod // "app-store-connect"')"
 
 KEYCHAIN_PASS="$(cfg '.mac.keychainPassword // ""')"
 
+# CLEAR_CACHE: env/CLI wins; if still empty, fall back to config.unity.clearCacheBeforeBuild.
+if [ -z "$CLEAR_CACHE" ]; then
+    CLEAR_CACHE="$(cfg '.unity.clearCacheBeforeBuild // false')"
+fi
+
 [ -f "$UNITY" ] || fail "Unity editor not found at $UNITY"
 ok "Unity: $UNITY"
 
@@ -327,6 +357,7 @@ echo "  Description:  ${DESCRIPTION:-(none)}"
 echo "  Skip iOS:     $SKIP_IOS"
 echo "  Skip macOS:   $SKIP_MACOS"
 echo "  Skip uploads: $SKIP_UPLOADS"
+echo "  Clear cache:  $CLEAR_CACHE"
 echo "  Dry run:      $DRY_RUN"
 
 # ---------- Unity runner ----------
@@ -376,6 +407,11 @@ run_unity() {
         fi
     fi
 }
+
+# ---------- Clear Unity caches (optional, before any Unity build) ----------
+if [ "$CLEAR_CACHE" = "true" ]; then
+    clear_unity_cache
+fi
 
 # ---------- iOS ----------
 if [ "$SKIP_IOS" != "true" ]; then

@@ -4,9 +4,11 @@
     "productName": "YourGame",
 
     "unity": {
+        "_comment": "clearCacheBeforeBuild=true removes Library/BurstCache, Library/Bee, Library/ScriptAssemblies, and Temp before every Unity run. Triggers a full reimport (+5-15 min first rebuild). Use when stale Burst/codegen output causes 'RpcSystem failed to deserialize RPC ... bits read X did not match expected Y' and similar wire-format desync. Also overridable per-run with -ClearCache (Windows) or --clear-cache / CLEAR_CACHE=true (Mac).",
         "version": "6000.3.8f1",
         "windowsEditorPath": "C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.8f1\\Editor\\Unity.exe",
-        "macEditorPath": "/Applications/Unity/Hub/Editor/6000.3.8f1/Unity.app/Contents/MacOS/Unity"
+        "macEditorPath": "/Applications/Unity/Hub/Editor/6000.3.8f1/Unity.app/Contents/MacOS/Unity",
+        "clearCacheBeforeBuild": false
     },
 
     "build": {

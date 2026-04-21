@@ -50,6 +50,13 @@
 .PARAMETER Yes
   Skip the plan-confirmation prompt.
 
+.PARAMETER ClearCache
+  Remove Library/BurstCache, Library/Bee, Library/ScriptAssemblies, and Temp
+  before the first Unity invocation. Forces a full reimport (+5-15 min).
+  Use to recover from stale-cache issues such as NetCode "RpcSystem failed
+  to deserialize RPC ... bits read X did not match expected Y". Also
+  settable persistently via unity.clearCacheBeforeBuild in config.local.json.
+
 .PARAMETER ConfigPath
   Alternate config file (defaults to Tools/Build/config.local.json).
 
@@ -84,6 +91,7 @@ param(
 
     [switch]$DryRun,
     [switch]$Yes,
+    [switch]$ClearCache,
 
     [string]$ConfigPath = ""
 )
@@ -162,6 +170,28 @@ function Clean-Dir([string]$path) {
     }
     if (-not $script:DryRun) {
         New-Item -ItemType Directory -Path $path -Force | Out-Null
+    }
+}
+
+# Nuke Unity's Burst AOT + Bee + assembly caches so the next Unity invocation
+# regenerates everything from scratch. Recovery tool for stale-cache issues
+# like NetCode "RpcSystem failed to deserialize RPC ... bits read X did not
+# match expected Y" where server+client disagree on wire format within one
+# process. Expensive (full reimport, +5-15 min) but deterministic.
+function Clear-UnityCache([string]$ProjectRoot) {
+    $dirs = @("Library/BurstCache", "Library/Bee", "Library/ScriptAssemblies", "Temp")
+    Write-Step "Clearing Unity caches ($ProjectRoot)"
+    Write-Warn "Next Unity run will do a full reimport."
+    foreach ($rel in $dirs) {
+        $abs = Join-Path $ProjectRoot $rel
+        if (Test-Path $abs) {
+            if ($script:DryRun) {
+                Write-Info "DRY-RUN: would remove $abs"
+            } else {
+                Write-Info "Removing $abs"
+                Remove-Item -Path $abs -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 
@@ -377,6 +407,8 @@ $DoiOS       = -not $SkipiOS
 $DoMacOS     = -not $SkipMacOS
 $DoMac       = $DoiOS -or $DoMacOS
 $DoUploads   = -not $SkipStoreUploads
+# -ClearCache CLI switch wins; otherwise fall back to unity.clearCacheBeforeBuild.
+$DoClearCache = [bool]$ClearCache -or [bool]$Config.unity.clearCacheBeforeBuild
 
 # Default Steam branch from config if caller didn't supply one.
 if (-not $Branch) {
@@ -529,6 +561,7 @@ Write-Host "  Android:           $planAndroid"
 Write-Host "  Windows:           $planWindows"
 Write-Host "  iOS:               $planiOS"
 Write-Host "  macOS:             $planMacOS"
+Write-Host "  Clear cache:       $DoClearCache"
 Write-Host "  Dry run:           $($DryRun.IsPresent)"
 Write-Host ""
 
@@ -541,6 +574,14 @@ if (-not $Yes -and -not $DryRun) {
 }
 
 $OverallStart = Get-Date
+
+# =================================================================
+# 0. Clear Unity caches (optional, before any Unity build)
+# =================================================================
+
+if ($DoClearCache) {
+    Clear-UnityCache -ProjectRoot $RepoRoot
+}
 
 # =================================================================
 # 1. Version bump
@@ -740,6 +781,7 @@ if ($DoMac) {
         if ($SkipMacOS)       { $macInv += " SKIP_MACOS=true" }
         if ($SkipStoreUploads){ $macInv += " SKIP_UPLOADS=true" }
         if ($DryRun)          { $macInv += " DRY_RUN=true" }
+        if ($DoClearCache)    { $macInv += " CLEAR_CACHE=true" }
         $macInv += " bash Tools/Build/build_mac.sh"
         Write-Host $macInv -ForegroundColor Gray
         Write-Host ""
@@ -762,7 +804,8 @@ if ($DoMac) {
             "SKIP_IOS=$(if ($SkipiOS)         { 'true' } else { 'false' })",
             "SKIP_MACOS=$(if ($SkipMacOS)     { 'true' } else { 'false' })",
             "SKIP_UPLOADS=$(if ($SkipStoreUploads) { 'true' } else { 'false' })",
-            "DRY_RUN=$(if ($DryRun)           { 'true' } else { 'false' })"
+            "DRY_RUN=$(if ($DryRun)           { 'true' } else { 'false' })",
+            "CLEAR_CACHE=$(if ($DoClearCache) { 'true' } else { 'false' })"
         ) -join ' '
 
         # Mac is a pure build slave: fetch, hard-reset to the remote tip, and

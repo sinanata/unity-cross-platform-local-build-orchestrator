@@ -110,6 +110,20 @@ Pick the alias that matches the SHA-256 fingerprint your Play Console shows unde
 
 The orchestrator aborts with "reported failure: <message>". Open the referenced Unity log file (path is in the error line). The real failure is usually an IL2CPP error, a missing Android SDK component, or a compile-error in your code that the editor tolerates but batchmode doesn't.
 
+### NetCode `RpcSystem failed to deserialize RPC ... bits read X did not match expected Y`
+
+Stale Burst AOT cache. Server and client live in the same build — even the same process — but different native compilations of the same C# type got cached: one agrees with the old wire format, one with the new. Commonly triggered by inserting (rather than appending) a field in an `IRpcCommand` struct.
+
+**Fix:** re-run with `-ClearCache` (Windows) / `--clear-cache` (Mac). The orchestrator nukes `Library/BurstCache`, `Library/Bee`, `Library/ScriptAssemblies`, and `Temp` before the next Unity invocation, forcing a full regeneration.
+
+```powershell
+.\Tools\Build\Build-All.ps1 -ClearCache
+```
+
+Or set `unity.clearCacheBeforeBuild: true` in `config.local.json` to keep it on by default. Full reimport adds ~5-15 min.
+
+Prevention: always **append** new fields to `IRpcCommand` structs; never insert in the middle. The wire layout is positional.
+
 ---
 
 ## Play Store

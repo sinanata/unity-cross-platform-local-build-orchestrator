@@ -219,6 +219,11 @@ This is the part that costs a day the first time. **[Full step-by-step in docs/C
 -SkipPush          Don't git-push (Mac will fail to pull — use only for local tests)
 -DryRun            Print every command; execute nothing
 -Yes               Skip the initial confirmation prompt
+-ClearCache        Nuke Library/BurstCache + Bee + ScriptAssemblies + Temp
+                   before building (full reimport). Use to recover from
+                   stale-cache issues like NetCode RPC wire-format desyncs.
+                   Persistent alternative: unity.clearCacheBeforeBuild=true
+                   in config.local.json.
 -ConfigPath path   Use an alternate config.*.json
 ```
 
