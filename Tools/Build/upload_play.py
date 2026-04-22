@@ -52,6 +52,16 @@ def _is_draft_app_error(e: HttpError) -> bool:
     return "draft app" in msg
 
 
+def _is_changes_not_sent_error(e: HttpError) -> bool:
+    # Play returns 400 "Changes cannot be sent for review automatically.
+    # Please set the query parameter changesNotSentForReview to true."
+    # when the edit contains metadata changes that must be reviewed
+    # manually in the Play Console first — commonly triggered by pending
+    # content-rating / data-safety / target-audience / Families updates.
+    msg = str(e).lower()
+    return "changesnotsentforreview" in msg
+
+
 def _set_track_release(edits, package: str, edit_id: str, track: str,
                        release: dict) -> None:
     edits.tracks().update(
@@ -113,22 +123,48 @@ def upload(service_account_path: Path, aab_path: Path, package: str,
             print(f"  Assigned versionCode {version_code} to '{track}' "
                   "and committed (live).", flush=True)
         except HttpError as commit_err:
-            if not _is_draft_app_error(commit_err):
+            if _is_draft_app_error(commit_err):
+                # Retry: same edit, same uploaded bundle, draft status.
+                print("  ! App is still in draft state on Play Console — "
+                      "Play rejects 'completed' releases until first review.",
+                      flush=True)
+                print("  Retrying commit with release.status='draft' "
+                      "(no re-upload).", flush=True)
+                release["status"] = "draft"
+                _set_track_release(edits, package, edit_id, track, release)
+                try:
+                    edits.commit(packageName=package, editId=edit_id).execute()
+                except HttpError as retry_err:
+                    if not _is_changes_not_sent_error(retry_err):
+                        raise
+                    edits.commit(packageName=package, editId=edit_id,
+                                 changesNotSentForReview=True).execute()
+                print(f"  Committed DRAFT release: versionCode {version_code} "
+                      f"on '{track}' track.", flush=True)
+                print("  MANUAL STEP: Play Console > Testing > Internal testing "
+                      "> Releases > promote the draft to roll out to testers.",
+                      flush=True)
+            elif _is_changes_not_sent_error(commit_err):
+                # Pending store-listing changes (content rating, data safety,
+                # target audience, Families declaration, etc.) prevent Play
+                # from auto-submitting. Commit the binary anyway; user sends
+                # for review manually once.
+                print("  ! Play has pending metadata changes that require "
+                      "manual review (content rating / data safety / target "
+                      "audience / Families declaration).", flush=True)
+                print("  Retrying commit with changesNotSentForReview=true "
+                      "(binary uploads, release queued for manual send).",
+                      flush=True)
+                edits.commit(packageName=package, editId=edit_id,
+                             changesNotSentForReview=True).execute()
+                print(f"  Committed versionCode {version_code} on '{track}' "
+                      "(pending manual send-for-review).", flush=True)
+                print("  MANUAL STEP: Play Console > Publishing overview > "
+                      "'Send N changes for review'. Subsequent uploads will "
+                      "auto-submit again once those changes are approved.",
+                      flush=True)
+            else:
                 raise
-            # Retry: same edit, same uploaded bundle, draft status.
-            print("  ! App is still in draft state on Play Console — "
-                  "Play rejects 'completed' releases until first review.",
-                  flush=True)
-            print("  Retrying commit with release.status='draft' "
-                  "(no re-upload).", flush=True)
-            release["status"] = "draft"
-            _set_track_release(edits, package, edit_id, track, release)
-            edits.commit(packageName=package, editId=edit_id).execute()
-            print(f"  Committed DRAFT release: versionCode {version_code} "
-                  f"on '{track}' track.", flush=True)
-            print("  MANUAL STEP: Play Console > Testing > Internal testing "
-                  "> Releases > promote the draft to roll out to testers.",
-                  flush=True)
         return version_code
 
     except HttpError as e:

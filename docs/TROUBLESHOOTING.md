@@ -156,6 +156,16 @@ Your `playStore.packageName` doesn't match any app in Play Console. Check for ty
 
 Your app is in Play's "draft" state (no release has been reviewed yet). The tool auto-falls-back to uploading as a **draft** release; you then manually promote it once in Play Console. See [CREDENTIALS § 5f](CREDENTIALS.md#5f-first-upload-the-draft-app-speed-bump).
 
+### `400 Changes cannot be sent for review automatically. Please set the query parameter changesNotSentForReview to true.`
+
+Play won't auto-submit this edit because the app has pending **metadata changes that require manual review** — commonly the content rating questionnaire, data-safety form, target-audience / Families declaration, or app-access instructions. This is separate from the bundle upload: the binary is fine, but Play wants a human to look at the metadata first.
+
+The tool auto-falls-back by retrying the commit with `changesNotSentForReview=true`, so the binary still uploads and the release is queued. You then finish it manually:
+
+**Play Console → Publishing overview → "Send N changes for review"** (button in the yellow banner).
+
+Once that batch is approved, subsequent uploads go back to auto-submitting. Expect to hit this once after any Families / data-safety / content-rating edit, then never again until the next metadata change.
+
 ### Upload says success but Play Console shows nothing
 
 Check **Release → Testing → Internal testing → Track history** (may take ~60s to appear). If the API reported a `versionCode`, the upload succeeded — it may just be in a different track than you're viewing.
