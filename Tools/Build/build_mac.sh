@@ -28,6 +28,66 @@ CONFIG_FILE="$SCRIPT_DIR/config.local.json"
 OUTPUT_DIR="$SCRIPT_DIR/output"
 mkdir -p "$OUTPUT_DIR"
 
+# =================================================================
+# Abort cleanup — kill the whole subtree + remove stale lockfile.
+# =================================================================
+# Triggered by:
+#   - Ctrl+C on Windows: ssh -t pipes ^C through the PTY, Mac TTY line
+#     discipline converts it to SIGINT delivered to our foreground pgrp.
+#   - SSH connection drop (PowerShell killed, network loss): sshd sends
+#     SIGHUP to the login shell.
+#   - Local kill / pkill from another terminal: SIGTERM.
+#
+# Without this, Unity + AssetImportWorker, xcodebuild + clang/IL2CPP,
+# xcrun altool's java subprocess, and steamcmd all orphan and keep
+# running under launchd — holding Temp/UnityLockfile, a Unity license
+# seat, and occasionally a steamcmd login session. The next build then
+# fails immediately with "license already in use" or Unity exits 1
+# before any progress.
+
+# Print every descendant PID of $1, children-first (leaves before roots),
+# so a subsequent SIGTERM tears down without re-parenting races.
+_list_descendants() {
+    local pid="$1"
+    local kids
+    kids="$(pgrep -P "$pid" 2>/dev/null || true)"
+    for k in $kids; do
+        _list_descendants "$k"
+        echo "$k"
+    done
+}
+
+abort_cleanup() {
+    # Prevent re-entry if another signal arrives mid-cleanup.
+    trap - INT TERM HUP EXIT
+    set +e
+    printf "\n"
+    printf "%s  [WARN] Interrupted — killing child processes...%s\n" "${C_YELLOW:-}" "${C_RESET:-}" >&2
+
+    local descendants
+    descendants="$(_list_descendants $$)"
+    if [ -n "$descendants" ]; then
+        # shellcheck disable=SC2086
+        kill -TERM $descendants 2>/dev/null
+        # Half-second grace for graceful shutdown, then SIGKILL stragglers.
+        sleep 0.5 2>/dev/null
+        # shellcheck disable=SC2086
+        kill -KILL $descendants 2>/dev/null
+    fi
+
+    # Unity holds Temp/UnityLockfile while running; killing it leaves the
+    # lockfile behind and blocks the next batchmode run.
+    if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/Temp/UnityLockfile" ]; then
+        rm -f "$REPO_ROOT/Temp/UnityLockfile" 2>/dev/null
+        printf "%s  [..]   Removed stale Temp/UnityLockfile.%s\n" "${C_GRAY:-}" "${C_RESET:-}" >&2
+    fi
+
+    # 130 = conventional SIGINT exit; close enough for all three signals.
+    exit 130
+}
+
+trap abort_cleanup INT TERM HUP
+
 # Unity batchmode entry-point class (matches BuildCli.cs namespace).
 UNITY_CLASS="BuildOrchestrator.Cli.BuildCli"
 

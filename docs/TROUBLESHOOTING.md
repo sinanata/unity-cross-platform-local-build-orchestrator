@@ -88,6 +88,27 @@ git log --oneline HEAD..origin/yourbranch
 
 Close the Unity Editor GUI. Unity's license checkout is exclusive — a live editor session and a batchmode invocation fight for the same seat and one of them loses.
 
+### `PrintVersion failed (exit 1)` immediately, no progress at all
+
+The project is locked by a leftover `Unity.exe` from a previous run — usually because the last build was canceled with **Ctrl+C** (or the PowerShell window was killed), leaving orphaned `AssetImportWorker` children that still hold `Temp\UnityLockfile`.
+
+The current `Build-All.ps1` wraps the full flow in `try/finally` and kills the tracked Unity process tree + removes the stale lockfile on exit, so this shouldn't re-occur. If you're on a pre-fix copy or the PowerShell process itself was killed (Task Manager, BSOD), clean up manually:
+
+```powershell
+Get-Process Unity -ErrorAction SilentlyContinue | Stop-Process -Force
+Remove-Item 'PATH\TO\YourProject\Temp\UnityLockfile' -Force -ErrorAction SilentlyContinue
+```
+
+Then re-run the build. If `Get-Process Unity` returns nothing but the lockfile still exists, just delete the lockfile.
+
+`build_mac.sh` has the same protection — a `trap abort_cleanup INT TERM HUP` walks the descendant process tree (Unity, `AssetImportWorker`, `xcodebuild`, `clang`, `altool`, `steamcmd`) on SIGINT (Ctrl+C via `ssh -t`), SIGHUP (SSH drop), or SIGTERM, and removes `Temp/UnityLockfile`. If a Windows BSOD / power loss prevents the trap from firing, the Mac sshd will detect the dead connection via TCP keepalive (default ~2 hours) and send SIGHUP then. Until then, clean up manually on the Mac:
+
+```bash
+pkill -f Unity.app
+pkill -f xcodebuild
+rm -f /path/to/your-project/Temp/UnityLockfile
+```
+
 ### `Keystore file not found: ...\game.keystore`
 
 `android.keystorePath` is resolved relative to the project root if not absolute. Either:

@@ -307,6 +307,55 @@ function Wait-UnityWithProgress {
     Write-Host -NoNewline ("`r" + (" " * $padWidth) + "`r")
 }
 
+# =================================================================
+# Unity process tracking — so Ctrl+C / errors don't leave zombies.
+# Unity spawns AssetImportWorker children that don't receive console
+# Ctrl+C; if orphaned they keep Temp/UnityLockfile held and every
+# subsequent build fails immediately with "PrintVersion exit 1".
+# =================================================================
+
+$script:ActiveUnityPids = New-Object System.Collections.ArrayList
+
+function Stop-ProcessTree([int]$RootPid) {
+    # Kill all descendants bottom-up, then the root. Swallow "no such
+    # process" errors — normal if the tree already exited cleanly.
+    $toKill = @()
+    $queue  = [System.Collections.Queue]::new()
+    $queue.Enqueue($RootPid)
+    while ($queue.Count -gt 0) {
+        $current = $queue.Dequeue()
+        $toKill += $current
+        try {
+            Get-CimInstance Win32_Process -Filter "ParentProcessId=$current" -ErrorAction SilentlyContinue |
+                ForEach-Object { $queue.Enqueue([int]$_.ProcessId) }
+        } catch {}
+    }
+    # Reverse so children die before parents (avoids re-parenting to PID 1).
+    [array]::Reverse($toKill)
+    foreach ($p in $toKill) {
+        try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch {}
+    }
+}
+
+function Stop-AllTrackedUnity {
+    if ($script:ActiveUnityPids.Count -eq 0) { return }
+    Write-Host ""
+    Write-Warn "Cleaning up $($script:ActiveUnityPids.Count) active Unity process tree(s)..."
+    foreach ($unityPid in @($script:ActiveUnityPids)) {
+        Stop-ProcessTree -RootPid $unityPid
+    }
+    $script:ActiveUnityPids.Clear()
+    # Unity holds Temp/UnityLockfile while running; if we just killed it,
+    # the file may linger and block the next run. Remove it.
+    $lock = Join-Path $RepoRoot "Temp\UnityLockfile"
+    if (Test-Path $lock) {
+        try {
+            Remove-Item $lock -Force -ErrorAction SilentlyContinue
+            Write-Info "Removed stale Temp\UnityLockfile."
+        } catch {}
+    }
+}
+
 function Run-Unity {
     param(
         [string]$UnityExe,
@@ -343,10 +392,18 @@ function Run-Unity {
     # moment the OS process exits, leaving ExitCode unreadable. Touching
     # .Handle now pins it for the lifetime of $proc.
     $null = $proc.Handle
+    # Track for Ctrl+C / error cleanup (Stop-AllTrackedUnity in main try/finally).
+    $null = $script:ActiveUnityPids.Add($proc.Id)
 
     $label = ($Method -split '\.')[-1]
-    Wait-UnityWithProgress -Process $proc -LogFile $logFile -Label $label
-    $proc.WaitForExit()
+    try {
+        Wait-UnityWithProgress -Process $proc -LogFile $logFile -Label $label
+        $proc.WaitForExit()
+    } finally {
+        # Unregister so the outer finally doesn't try to kill a PID that
+        # either exited naturally or was already reaped by the inner path.
+        $script:ActiveUnityPids.Remove($proc.Id)
+    }
 
     $report = $null
     if (Test-Path $reportFile) {
@@ -572,6 +629,11 @@ if (-not $Yes -and -not $DryRun) {
         exit 0
     }
 }
+
+# Wrap the whole build flow so Ctrl+C / Die / any exception still runs the
+# Unity-cleanup finally block. Without this, orphan Unity + AssetImportWorker
+# processes keep Temp/UnityLockfile held and break the next invocation.
+try {
 
 $OverallStart = Get-Date
 
@@ -853,3 +915,10 @@ if ($SteamConfigured) {
 if ($DoAndroid -and $Config.playStore.serviceAccountJsonPath) { Write-Host "  Play:   https://play.google.com/console/u/0/developers" -ForegroundColor DarkGray }
 if ($DoiOS     -and $Config.testFlight.ascApiKeyId)           { Write-Host "  ASC:    https://appstoreconnect.apple.com/apps" -ForegroundColor DarkGray }
 Write-Host ""
+
+} finally {
+    # Runs on success, on Die/throw, and on Ctrl+C (which surfaces as
+    # PipelineStoppedException). Kills any still-tracked Unity process
+    # tree and wipes Temp\UnityLockfile so the next run is clean.
+    Stop-AllTrackedUnity
+}
