@@ -439,6 +439,139 @@ function Invoke-Unity-OrDie {
 }
 
 # =================================================================
+# Wake-on-LAN — wake the Mac before we try to SSH into it.
+# =================================================================
+# A sleeping Mac makes every downstream step fail: the preflight SSH probe
+# times out, hostnames don't resolve via Bonjour, disk/network syscalls
+# stall for a few seconds after wake. We send a magic packet first, then
+# poll the SSH port until it accepts connections, before the real SSH
+# probe runs.
+#
+# Requires on the Mac:
+#   - System Settings > Energy Saver (or Battery > Options on laptops)
+#     -> "Wake for network access" ON
+#   - Plugged into power (laptops on battery do not honour WoL)
+#   - Ethernet strongly preferred — macOS Wi-Fi WoL varies by model
+#
+# On this Windows machine:
+#   - No firewall changes needed (outbound UDP:9 to the LAN broadcast).
+
+function Send-MagicPacket {
+    param(
+        [Parameter(Mandatory)][string]$MacAddress,
+        [string]$BroadcastAddress = '255.255.255.255',
+        [int]$Port = 9
+    )
+    $clean = $MacAddress -replace '[^0-9A-Fa-f]', ''
+    if ($clean.Length -ne 12) {
+        throw "Invalid MAC address '$MacAddress' (expected 12 hex chars, e.g. AA:BB:CC:DD:EE:FF)"
+    }
+    $macBytes = New-Object byte[] 6
+    for ($i = 0; $i -lt 6; $i++) {
+        $macBytes[$i] = [Convert]::ToByte($clean.Substring($i * 2, 2), 16)
+    }
+    # Magic packet: 6 bytes of 0xFF followed by the 6-byte MAC repeated 16 times.
+    $packet = New-Object byte[] 102
+    for ($i = 0; $i -lt 6; $i++) { $packet[$i] = 0xFF }
+    for ($i = 0; $i -lt 16; $i++) {
+        [Array]::Copy($macBytes, 0, $packet, 6 + ($i * 6), 6)
+    }
+    $udp = New-Object System.Net.Sockets.UdpClient
+    $udp.EnableBroadcast = $true
+    try {
+        $ep = New-Object System.Net.IPEndPoint ([System.Net.IPAddress]::Parse($BroadcastAddress)), $Port
+        [void]$udp.Send($packet, $packet.Length, $ep)
+    } finally {
+        try { $udp.Close() } catch {}
+    }
+}
+
+# Short-timeout TCP handshake probe. Cheaper than a real SSH login (no
+# auth, no banner exchange) and the Connected flag flips as soon as
+# sshd's listener accepts — which happens the instant the Mac is
+# reachable, independent of how long sshd takes to load config.
+function Test-MacSshPort {
+    param(
+        [Parameter(Mandatory)][string]$HostName,
+        [int]$Port = 22,
+        [int]$TimeoutMs = 2000
+    )
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $task = $client.ConnectAsync($HostName, $Port)
+        if ($task.Wait($TimeoutMs) -and $client.Connected) {
+            return $true
+        }
+    } catch {
+        # DNS failure / unreachable / refused — all mean "not ready yet".
+    } finally {
+        try { $client.Close() } catch {}
+    }
+    return $false
+}
+
+function Wake-Mac {
+    param(
+        [Parameter(Mandatory)][string]$HostName,
+        [int]$Port = 22,
+        [string]$MacAddress = "",
+        [string]$BroadcastAddress = '255.255.255.255',
+        [int]$WolPort = 9,
+        [int]$TimeoutSec = 90
+    )
+
+    Write-Info "Checking if Mac '$HostName' is reachable..."
+    if (Test-MacSshPort -HostName $HostName -Port $Port -TimeoutMs 2000) {
+        Write-Ok "Mac is already awake."
+        return
+    }
+
+    if (-not $MacAddress) {
+        Write-Warn "Mac unresponsive on ${HostName}:${Port} and mac.macAddress is not set in config.local.json."
+        Write-Warn "Continuing; if the Mac is actually asleep, the SSH probe below will fail with a concrete error."
+        Write-Warn "To auto-wake: add  `"macAddress`": `"AA:BB:CC:DD:EE:FF`"  to the mac section of config.local.json."
+        return
+    }
+
+    if ($script:DryRun) {
+        Write-Info "DRY-RUN: would send WoL magic packet for $MacAddress to ${BroadcastAddress}:${WolPort}"
+        Write-Info "DRY-RUN: would then poll ${HostName}:${Port} every 3s for up to ${TimeoutSec}s"
+        return
+    }
+
+    Write-Info "Mac is asleep / unreachable. Sending Wake-on-LAN packet to $MacAddress (${BroadcastAddress}:${WolPort})..."
+    try {
+        Send-MagicPacket -MacAddress $MacAddress -BroadcastAddress $BroadcastAddress -Port $WolPort
+    } catch {
+        Write-Warn "Failed to send magic packet: $($_.Exception.Message)"
+        Write-Warn "Continuing anyway - the SSH probe below will give a concrete error if the Mac is still asleep."
+        return
+    }
+
+    Write-Info "Polling ${HostName}:${Port} every 3s for up to ${TimeoutSec}s..."
+    # Macs typically take 5-15s to wake + bring up sshd. A brief initial
+    # pause avoids a guaranteed-wasted first probe that races the wake-up.
+    Start-Sleep -Seconds 3
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $attempt  = 0
+    while ((Get-Date) -lt $deadline) {
+        $attempt++
+        if (Test-MacSshPort -HostName $HostName -Port $Port -TimeoutMs 2000) {
+            Write-Host ""
+            Write-Ok "Mac online after $attempt probe(s)."
+            return
+        }
+        Write-Host "." -NoNewline -ForegroundColor DarkGray
+        Start-Sleep -Seconds 3
+    }
+    Write-Host ""
+    Write-Warn "Mac still not reachable after ${TimeoutSec}s. Falling through to the SSH probe for a concrete error."
+    Write-Warn "Checklist: (1) plugged into power, (2) 'Wake for network access' ON in System Settings,"
+    Write-Warn "  (3) Ethernet preferred over Wi-Fi, (4) Windows + Mac on the same LAN,"
+    Write-Warn "  (5) mac.macAddress matches the active NIC (en0/en1 from 'ifconfig'), not a virtual interface."
+}
+
+# =================================================================
 # Preflight
 # =================================================================
 
@@ -536,6 +669,20 @@ if ($DoMac -and $Config.mac.runMode -eq "ssh") {
     if (-not $Config.mac.sshHost -or -not $Config.mac.sshUser) {
         Die "mac.sshHost / mac.sshUser must be set in config.local.json."
     }
+
+    # Wake the Mac if it's asleep. No-op when already reachable or when
+    # mac.macAddress is unset (graceful degradation — the SSH probe below
+    # still gives a real error if the Mac actually is asleep).
+    $sshPortNum = if ($Config.mac.sshPort)              { [int]$Config.mac.sshPort }            else { 22 }
+    $wolBcast   = if ($Config.mac.wolBroadcastAddress)  { $Config.mac.wolBroadcastAddress }     else { '255.255.255.255' }
+    $wolPortNum = if ($Config.mac.wolPort)              { [int]$Config.mac.wolPort }            else { 9 }
+    $wakeTO     = if ($Config.mac.wakeTimeoutSec)       { [int]$Config.mac.wakeTimeoutSec }     else { 90 }
+    Wake-Mac -HostName $Config.mac.sshHost `
+             -Port $sshPortNum `
+             -MacAddress ([string]$Config.mac.macAddress) `
+             -BroadcastAddress $wolBcast `
+             -WolPort $wolPortNum `
+             -TimeoutSec $wakeTO
 
     $sshKeyResolved = $null
     if ($Config.mac.sshKey) { $sshKeyResolved = Resolve-UserPath $Config.mac.sshKey }

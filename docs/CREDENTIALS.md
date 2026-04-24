@@ -79,6 +79,48 @@ ssh you@yourmac.local uname -a
 
 Expected: a single line starting with `Darwin`. No password prompt.
 
+### Optional: Wake-on-LAN for a sleeping Mac
+
+If your Mac often sleeps between builds (laptops, or desktops with aggressive idle-sleep), the orchestrator can wake it via WoL before it tries SSH. Skip this whole subsection if your Mac stays awake 24/7.
+
+**On the Mac**, enable wake-on-network:
+
+- **System Settings → Energy Saver** (desktop / Mac mini) *or* **Battery → Options** (laptops) → **Wake for network access** → **On** (or **Only on Power Adapter**).
+- Plug the Mac into power. Laptops on battery will not honour WoL.
+
+**On Wi-Fi only — disable Private Wi-Fi Address** for this SSID (otherwise macOS randomises the MAC every ~2 weeks and your config silently rots):
+
+- **System Settings → Wi-Fi → (i) next to the connected network → Private Wi-Fi Address → Off**
+- The Mac will drop and reconnect with its hardware MAC.
+
+**Find the MAC you'll use** over SSH:
+
+```bash
+ifconfig en0 | grep -E 'ether|inet '    # active interface: its MAC + IP
+networksetup -getmacaddress Wi-Fi       # hardware MAC (should match after toggling Private off)
+```
+
+Use the **active** MAC from `ifconfig` — on Wi-Fi that's what the AP sees. If you toggled Private Wi-Fi Address off above, this now equals the hardware MAC and stays stable forever.
+
+**Fill in the Windows-side config**:
+
+```jsonc
+"mac": {
+    "sshHost":              "YourMac.local",
+    "sshUser":              "you",
+    "sshKey":               "~/.ssh/id_ed25519",
+    "sshPort":              22,
+    "macAddress":           "AA:BB:CC:DD:EE:FF",
+    "wolBroadcastAddress":  "192.168.1.255",      // subnet-directed, matches your LAN
+    "wolPort":              9,
+    "wakeTimeoutSec":       90
+}
+```
+
+Leave `macAddress` empty to disable WoL; the orchestrator falls through to the regular SSH probe with a one-line warning.
+
+Gotchas (DHCP lease change after MAC toggle, deep-standby Wi-Fi chip power-off, corporate UDP filtering) are covered in [TROUBLESHOOTING § Mac is asleep](TROUBLESHOOTING.md#mac-is-asleep-when-the-build-starts-or-drops-network-mid-run).
+
 ---
 
 ## 2. Mac → GitHub SSH
@@ -440,11 +482,16 @@ Both machines (Windows + Mac) need their own `config.local.json`. Most fields ar
 
 ```jsonc
 "mac": {
-    "runMode": "ssh",
-    "sshHost": "YourMac.local",
-    "sshUser": "you",
-    "sshKey": "~/.ssh/id_ed25519",
-    "sshPort": 22
+    "runMode":              "ssh",
+    "sshHost":              "YourMac.local",
+    "sshUser":              "you",
+    "sshKey":               "~/.ssh/id_ed25519",
+    "sshPort":              22,
+    // Optional Wake-on-LAN — only the Windows side reads these (see §1 Optional):
+    "macAddress":           "",                      // empty disables WoL
+    "wolBroadcastAddress":  "192.168.1.255",
+    "wolPort":              9,
+    "wakeTimeoutSec":       90
 }
 ```
 

@@ -34,6 +34,107 @@ Either install Python 3.8+ and `pip install google-auth google-api-python-client
 
 ## Mac / SSH
 
+### Mac is asleep when the build starts (or drops network mid-run)
+
+A sleeping Mac fails every downstream step: the preflight SSH probe times out, `.local` hostnames may not resolve (Bonjour is off during deep sleep), and disk/network syscalls can stall for several seconds just after wake. The orchestrator handles this by:
+
+1. **TCP-probing** `sshPort` on the Mac before anything else (2s timeout).
+2. If no response, **sending a Wake-on-LAN magic packet** to `mac.macAddress` via UDP to `mac.wolBroadcastAddress:mac.wolPort`.
+3. **Polling SSH** every 3s for up to `mac.wakeTimeoutSec` seconds (default 90).
+4. Once `build_mac.sh` starts, it spawns `caffeinate -dims -w $$` to keep the Mac awake for the full build. Caffeinate exits automatically when the shell does (success, error, or Ctrl+C).
+
+> **Good to know**: macOS's "Wake for network access" wakes on *any* incoming TCP SYN to a listening port, not just magic packets. So even if magic-packet delivery is flaky on your LAN, the orchestrator's initial 2-second TCP probe itself tends to wake the Mac. The WoL path is primarily insurance for when the TCP probe times out (deep sleep / standby, slow hardware wake, or broken Wi-Fi WoL).
+
+**To enable Wake-on-LAN:**
+
+1. Find the active interface and its MAC. SSH in and run:
+   ```bash
+   ifconfig en0 | grep -E 'ether|inet '   # active MAC + IP of en0
+   networksetup -getmacaddress Wi-Fi      # hardware MAC for Wi-Fi
+   ```
+   Use the **MAC from `ifconfig`** — that's what's actually on the wire. On Wi-Fi, the AP only associates + delivers broadcast frames to *that* MAC.
+
+2. macOS: **System Settings → Energy Saver** (desktop / Mac mini) *or* **Battery → Options** (laptops) → **Wake for network access** → **On** (or **Only on Power Adapter** for laptops).
+
+3. Plug the Mac into power. Laptops on battery will not honour WoL, full stop.
+
+4. Add the fields to `config.local.json` on the Windows side:
+   ```jsonc
+   "mac": {
+       "sshHost":              "YourMac.local",     // or LAN IP
+       "sshUser":              "you",
+       "macAddress":           "AA:BB:CC:DD:EE:FF",
+       "wolBroadcastAddress":  "192.168.1.255",      // subnet-directed; see below
+       "wolPort":              9,
+       "wakeTimeoutSec":       90,
+       ...
+   }
+   ```
+
+Leaving `macAddress` empty disables WoL entirely — the tool prints a one-line warning and falls through to the real SSH probe.
+
+---
+
+### Wi-Fi trap: Private Wi-Fi Address randomises the MAC (macOS 14+)
+
+Since macOS Sonoma (14), each Wi-Fi network has a **Private Wi-Fi Address** setting that's on by default. It presents a randomised locally-administered MAC to the AP instead of the burnt-in hardware MAC, and rotates it every ~2 weeks or on SSID reconnect. Wi-Fi WoL with this on means your `macAddress` config entry works today and silently breaks next rotation.
+
+**How to tell which MAC you're seeing:**
+
+```bash
+ifconfig en0 | awk '/ether/ {print $2}'    # currently on the wire
+networksetup -getmacaddress Wi-Fi          # burnt-in hardware MAC
+```
+
+If the two differ, Private Wi-Fi Address is active. Quick visual check: if bit 1 of the first octet is set (e.g. `0xA6 = 10100110` → bit 1 is 1), it's locally administered (randomised). A burnt-in MAC usually has that bit clear (e.g. `0x74 = 01110100`).
+
+**Three ways to live with this:**
+
+- **Track the rotating MAC.** Every time WoL breaks, SSH in, re-read `ifconfig en0`, update config. Works, but surprises you every couple of weeks.
+- **Disable Private Wi-Fi Address for this SSID.** *(Recommended for a build host.)* On the Mac: **System Settings → Wi-Fi → (i) next to the connected network → Private Wi-Fi Address → Off**. The Mac drops and reconnects using its hardware MAC; from then on `ifconfig en0` and `networksetup -getmacaddress Wi-Fi` match and stay matched. There's no CLI equivalent on macOS 15.6 — `networksetup -setPrivateWiFiAddressMode` does not exist.
+- **Switch to Ethernet.** Private Wi-Fi Address doesn't apply to Ethernet. `ifconfig en3` (or whichever Ethernet adapter), read its MAC, plug it into the LAN, use that interface's IP and MAC. Ethernet WoL is also more reliable across deep-sleep / standby than Wi-Fi WoL regardless of Private MAC.
+
+**After toggling Private Wi-Fi Address, your Mac's IP may change.** DHCP treats the new MAC as a new client and assigns a fresh lease. Either set a **DHCP reservation** for the hardware MAC in your router, give the Mac a static IP, or update `mac.sshHost` to the new IP after confirming with `ifconfig en0 | grep 'inet '`.
+
+---
+
+### WoL fires but the Mac doesn't wake
+
+**Limited broadcast didn't get forwarded.** `wolBroadcastAddress: "255.255.255.255"` is the *limited* broadcast; most consumer routers accept it on the same LAN but drop it at VLAN / subnet boundaries. If Windows and Mac are on the same LAN but your router is strict, use a **subnet-directed** broadcast matching the Mac's subnet — e.g. `"192.168.1.255"`.
+
+**Windows outbound firewall / VPN.** Corporate outbound rules sometimes block UDP 9. Try `"wolPort": 7`, or temporarily allow the outbound rule. If you have a VPN or Hyper-V virtual switch consuming the default route, WoL traffic may leave on the wrong interface — disable the virtual adapter and retry.
+
+**Mac is in deep standby.** macOS transitions from regular sleep to **standby** after a few hours (default ~3 hours on AC), where the Wi-Fi chip is powered off entirely. At that point no magic packet can reach the Wi-Fi radio; only a keypress, a USB event, or Ethernet WoL can wake it. Mitigations:
+
+```bash
+sudo pmset -c standby 0       # AC: never go into standby (keeps Wi-Fi chip alive, tiny AC draw)
+```
+
+or just use Ethernet — the PHY stays powered regardless of standby mode, and Ethernet WoL works from any sleep depth.
+
+**Mac wakes but slower than 90 s.** Raise `wakeTimeoutSec` to 180 for a Mac mini on a slow SSD after deep sleep. Long delays before port-open usually mean sshd is disabled or Remote Login got turned off — `sudo launchctl list | grep ssh` should show `com.openssh.sshd`.
+
+---
+
+### Mac sleeps too eagerly (every build starts against a sleeping Mac)
+
+Check `pmset -g`:
+
+```
+AC Power:
+ sleep                1      ← aggressive: sleeps after 1 min of idle
+ displaysleep         60
+ standby              1
+```
+
+Raise the idle-to-sleep timeout on AC:
+
+```bash
+sudo pmset -c sleep 60        # sleep after 60 min idle on AC (or 0 = never)
+```
+
+This is a quality-of-life fix, not a WoL fix — the orchestrator can still wake a sleeping Mac. But fewer wake cycles mean faster builds overall and less chance of hitting deep standby.
+
 ### `Operation not permitted` when the SSH session reads files in `~/Documents`
 
 macOS TCC is blocking `sshd` from reading protected directories.

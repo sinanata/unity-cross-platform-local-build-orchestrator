@@ -238,6 +238,7 @@ Every run verifies these **before** touching Unity:
 - Python + Play JSON are present when Play upload is planned.
 - 10+ GB free on the build drive (warning below that threshold).
 - Mac reachable with a 6-second SSH probe. Fails fast with a fix-checklist if Remote Login isn't on yet.
+- **Sleeping Mac auto-wake** — if the preflight TCP probe times out, the orchestrator sends a Wake-on-LAN magic packet to `mac.macAddress` and polls SSH until it responds (configurable timeout). Once the build starts on the Mac, `caffeinate -dims -w $$` keeps it awake for the full run and exits with the shell. Works on Wi-Fi with a couple of caveats — see [TROUBLESHOOTING.md § Mac is asleep](docs/TROUBLESHOOTING.md#mac-is-asleep-when-the-build-starts-or-drops-network-mid-run).
 - `BuildCli.cs` writes a JSON report after every Unity step; orchestrator aborts if `success != true`.
 - `Clean-Dir` refuses to delete a path shorter than 8 characters or a bare drive root — protects you from a typo like `windowsBuildDir: "D:\"`.
 - Android keystore password is wiped from in-memory `PlayerSettings` after the AAB build so it can never leak into `ProjectSettings.asset`.

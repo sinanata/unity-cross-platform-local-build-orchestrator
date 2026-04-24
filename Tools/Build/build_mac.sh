@@ -88,6 +88,27 @@ abort_cleanup() {
 
 trap abort_cleanup INT TERM HUP
 
+# =================================================================
+# Keep the Mac awake for the entire build.
+# =================================================================
+# A Mac that's asleep when the Windows orchestrator reaches this script
+# is already woken via Wake-on-LAN (see Wake-Mac in Build-All.ps1). But
+# even an awake Mac will happily enter idle / disk / system sleep during
+# the 15-30 minute headless Unity + xcodebuild run if the user doesn't
+# touch the keyboard, which produces opaque I/O stalls and silent SSH
+# drops mid-build.
+#
+# `caffeinate -dims -w $$` attaches to this shell's PID and exits when
+# the shell exits (normally on script completion, or via abort_cleanup's
+# descendant-walker on Ctrl+C / SSH drop). No cleanup needed.
+#   -d  prevent display sleep (harmless headless)
+#   -i  prevent idle sleep
+#   -m  prevent disk idle sleep (important during long Unity imports)
+#   -s  prevent system sleep (only honoured when plugged in)
+if command -v caffeinate >/dev/null 2>&1; then
+    caffeinate -dims -w $$ >/dev/null 2>&1 &
+fi
+
 # Unity batchmode entry-point class (matches BuildCli.cs namespace).
 UNITY_CLASS="BuildOrchestrator.Cli.BuildCli"
 

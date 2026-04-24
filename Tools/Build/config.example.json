@@ -47,12 +47,16 @@
     },
 
     "mac": {
-        "_comment": "runMode=ssh drives the Mac over SSH from Windows; runMode=manual prints the command for you to run yourself. keychainPassword is ONLY read by the Mac-side build_mac.sh — the Windows PC never sees it. It's your macOS login password, needed so codesign can access the signing identity's private key in a headless SSH session (otherwise xcodebuild fails with errSecInternalComponent). Leave empty if you only ever run build_mac.sh from a GUI terminal.",
+        "_comment": "runMode=ssh drives the Mac over SSH from Windows; runMode=manual prints the command for you to run yourself. keychainPassword is ONLY read by the Mac-side build_mac.sh — the Windows PC never sees it. It's your macOS login password, needed so codesign can access the signing identity's private key in a headless SSH session (otherwise xcodebuild fails with errSecInternalComponent). Leave empty if you only ever run build_mac.sh from a GUI terminal. macAddress enables Wake-on-LAN: if the Mac is asleep when the Windows orchestrator starts, a magic packet is sent and SSH is polled until ready. Requires on the Mac: System Settings > Energy Saver (or Battery > Options) > 'Wake for network access' ON, plugged into power, Ethernet strongly preferred. Find the MAC with `ifconfig en0 | grep ether` (Ethernet) or `ifconfig en1 | grep ether` (Wi-Fi); use the active interface. Leave macAddress empty to disable WoL entirely (you'll get a warn-and-continue if the Mac is asleep). wolBroadcastAddress defaults to 255.255.255.255; switch to a directed broadcast like 192.168.1.255 if your router doesn't forward limited broadcasts across subnets. wolPort is 9 by default (7 also common).",
         "runMode": "ssh",
         "sshHost": "YourMac.local",
         "sshUser": "YOU",
         "sshKey": "~/.ssh/id_ed25519",
         "sshPort": 22,
+        "macAddress": "",
+        "wolBroadcastAddress": "255.255.255.255",
+        "wolPort": 9,
+        "wakeTimeoutSec": 90,
         "keychainPassword": ""
     },
 
