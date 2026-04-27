@@ -4,6 +4,21 @@ All notable changes to this project will be documented here.
 
 This project loosely follows [Semantic Versioning](https://semver.org/) and uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [1.1.1] — 2026-04-25
+
+### Fixed
+
+- **`Stop-AllTrackedUnity` now scrubs `Temp\UnityLockfile` unconditionally.** The previous implementation early-returned when no Unity PIDs were tracked — but `Run-Unity` always unregisters its own PID in its inner finally, so by the time the outer cleanup runs the list is empty, and the lockfile cleanup at the bottom of the function never executed. Net effect: Unity native crashes (`-1073741819` access violation etc.) left a stale `Temp\UnityLockfile` behind that blocked every subsequent build with `PrintVersion failed (exit 1) immediately, no progress at all`. The fix splits the function into a conditional "kill tracked PIDs" path and an unconditional `Remove-StaleUnityLockfile` call, plus a preflight call to recover from any pre-existing stale lockfiles left by older orchestrator versions or hard reboots.
+
+### Added
+
+- **Native-crash exit-code decoding.** `Invoke-Unity-OrDie` now maps known NTSTATUS exception codes (`-1073741819`, `-1073741571`, `-1073740940`, `-1073740791`, `-1073741795`, …) to their human-readable labels (`STATUS_ACCESS_VIOLATION`, `STATUS_STACK_OVERFLOW`, `STATUS_HEAP_CORRUPTION`, `STATUS_STACK_BUFFER_OVERRUN`, `STATUS_ILLEGAL_INSTRUCTION`, …) and prints a recovery checklist with the path to `%TEMP%\Unity\Editor\Crashes\` and a pointer to the `-ClearCache` flag, so users don't have to look up the crash code manually.
+- **TROUBLESHOOTING.md § "Unity crashed in native code"** — full recovery flow including where to find `crash.dmp`, when to use `-ClearCache`, and project-specific suspects for the EDM4U `VersionHandler` family.
+
+### Known tool quirks worked around
+
+- PowerShell here-string interpolation: `"$Label:"` is parsed as a *scoped* variable reference (`$Label:Whatever`), not as the variable `$Label` followed by a colon. Use `"${Label}:"` to delimit the variable name. Cost: one syntax-check round while writing the native-crash diagnostic message.
+
 ## [1.1.0] — 2026-04-24
 
 ### Added

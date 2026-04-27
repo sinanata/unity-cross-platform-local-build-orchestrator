@@ -338,21 +338,38 @@ function Stop-ProcessTree([int]$RootPid) {
 }
 
 function Stop-AllTrackedUnity {
-    if ($script:ActiveUnityPids.Count -eq 0) { return }
-    Write-Host ""
-    Write-Warn "Cleaning up $($script:ActiveUnityPids.Count) active Unity process tree(s)..."
-    foreach ($unityPid in @($script:ActiveUnityPids)) {
-        Stop-ProcessTree -RootPid $unityPid
+    # Two paths, both must run in the outer finally:
+    #   1. If we still have tracked Unity PIDs (Ctrl+C / orchestrator throw),
+    #      tree-kill them.
+    #   2. ALWAYS scrub Temp\UnityLockfile if present. Run-Unity unregisters
+    #      its PID in its inner finally even on native crash, so by the time
+    #      we get here the tracked-PID list is empty - but a native-crashed
+    #      Unity (exit -1073741819 etc.) still leaves the lockfile behind,
+    #      which would block the next invocation with "PrintVersion exit 1".
+    if ($script:ActiveUnityPids.Count -gt 0) {
+        Write-Host ""
+        Write-Warn "Cleaning up $($script:ActiveUnityPids.Count) active Unity process tree(s)..."
+        foreach ($unityPid in @($script:ActiveUnityPids)) {
+            Stop-ProcessTree -RootPid $unityPid
+        }
+        $script:ActiveUnityPids.Clear()
     }
-    $script:ActiveUnityPids.Clear()
-    # Unity holds Temp/UnityLockfile while running; if we just killed it,
-    # the file may linger and block the next run. Remove it.
+    Remove-StaleUnityLockfile
+}
+
+# Idempotent: removes Temp\UnityLockfile if it exists and no Unity.exe is
+# currently running under the project's Library. Called both in cleanup
+# (after a tracked Unity died) and in preflight (in case a previous run
+# died before its cleanup hit, e.g. Task Manager kill, BSOD, hard reboot).
+function Remove-StaleUnityLockfile {
     $lock = Join-Path $RepoRoot "Temp\UnityLockfile"
-    if (Test-Path $lock) {
-        try {
-            Remove-Item $lock -Force -ErrorAction SilentlyContinue
-            Write-Info "Removed stale Temp\UnityLockfile."
-        } catch {}
+    if (-not (Test-Path $lock)) { return }
+    try {
+        Remove-Item $lock -Force -ErrorAction Stop
+        Write-Info "Removed stale Temp\UnityLockfile."
+    } catch {
+        # File-locked = another Unity legitimately holds it. Leave it alone.
+        Write-Warn "Temp\UnityLockfile present but locked - another Unity is running."
     }
 }
 
@@ -423,6 +440,26 @@ function Run-Unity {
     return @{ ExitCode = $exitCode; Report = $report; LogFile = $logFile }
 }
 
+# Map a Windows process exit code to a human-readable native-crash label
+# when it matches one of the documented NTSTATUS exception codes. PowerShell
+# surfaces these as signed Int32, so we compare against signed values.
+# Returns $null when the code isn't a known native crash (treat as a regular
+# build / batchmode failure instead).
+function Get-NativeCrashLabel([int]$ExitCode) {
+    switch ($ExitCode) {
+        -1073741819 { return "STATUS_ACCESS_VIOLATION (0xC0000005) - segfault / null deref" }
+        -1073741676 { return "STATUS_INTEGER_DIVIDE_BY_ZERO (0xC0000094)" }
+        -1073741571 { return "STATUS_STACK_OVERFLOW (0xC00000FD)" }
+        -1073740791 { return "STATUS_STACK_BUFFER_OVERRUN (0xC0000409) - usually GS-cookie corruption" }
+        -1073740940 { return "STATUS_HEAP_CORRUPTION (0xC0000374)" }
+        -1073741795 { return "STATUS_ILLEGAL_INSTRUCTION (0xC000001D)" }
+        -1073741512 { return "STATUS_DLL_INIT_FAILED (0xC0000142)" }
+        -1073741515 { return "STATUS_DLL_NOT_FOUND (0xC0000135)" }
+        -1073740286 { return "STATUS_FATAL_USER_CALLBACK_EXCEPTION (0xC000041D)" }
+        default     { return $null }
+    }
+}
+
 function Invoke-Unity-OrDie {
     param(
         [string]$UnityExe, [string]$Method, [string]$BuildTarget,
@@ -430,6 +467,33 @@ function Invoke-Unity-OrDie {
     )
     $r = Run-Unity -UnityExe $UnityExe -Method $Method -BuildTarget $BuildTarget -ExtraArgs $ExtraArgs
     if ($r.ExitCode -ne 0) {
+        $crash = Get-NativeCrashLabel $r.ExitCode
+        if ($crash) {
+            # Unity's own crash handler dumps to %TEMP%\Unity\Editor\Crashes
+            # regardless of -logFile. Surface the full directory so the user
+            # can grab the crash.dmp without hunting.
+            $crashDir = Join-Path $env:TEMP "Unity\Editor\Crashes"
+            $hint = @"
+${Label}: Unity crashed in native code (exit $($r.ExitCode) = $crash).
+       This is a Unity Editor crash, not a build error. The Unity log
+       has no managed stack trace because the fault was below the C# layer.
+
+  Unity log:    $($r.LogFile)
+  Crash dumps:  $crashDir   (open the most recent Crash_* folder)
+
+  Recovery:
+   1. Re-run with -ClearCache (nukes Library/Bee, Library/BurstCache,
+      Library/ScriptAssemblies, Temp). Most native crashes during script
+      compile / asset reload are stale-cache desyncs and clear up here.
+   2. Check Library/EditorInstance.json + Temp/UnityLockfile are gone.
+      The orchestrator removes the lockfile in its finally; do it manually
+      if you killed PowerShell with Task Manager.
+   3. If the crash repeats with cleared caches, file the crash.dmp +
+      Unity log to Unity (Help > Report a Bug from a fresh editor) and
+      try with the previous Editor patch version.
+"@
+            Die $hint
+        }
         Die "$Label failed (exit $($r.ExitCode)). Full log: $($r.LogFile)"
     }
     if ($r.Report -and ($r.Report.PSObject.Properties.Name -contains 'success') -and (-not $r.Report.success)) {
@@ -590,6 +654,13 @@ $AabName        = if ($Config.build.aabName)        { $Config.build.aabName }   
 $UnityWin = $Config.unity.windowsEditorPath
 if (-not (Test-Path $UnityWin)) { Die "Unity editor not found at: $UnityWin (check unity.windowsEditorPath)" }
 Write-Ok "Unity: $UnityWin"
+
+# Belt-and-suspenders: a previous run that died outside our finally (Task
+# Manager kill, BSOD, hard reboot, or a native Unity crash on an old build
+# of this orchestrator) leaves Temp\UnityLockfile behind. Remove it now if
+# nothing currently has it open. Remove-StaleUnityLockfile leaves it alone
+# if a real Unity is holding the lock.
+Remove-StaleUnityLockfile
 
 $DoAndroid   = -not $SkipAndroid
 $DoWindows   = -not $SkipWindows

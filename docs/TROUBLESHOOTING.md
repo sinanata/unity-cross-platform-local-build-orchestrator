@@ -191,16 +191,22 @@ Close the Unity Editor GUI. Unity's license checkout is exclusive — a live edi
 
 ### `PrintVersion failed (exit 1)` immediately, no progress at all
 
-The project is locked by a leftover `Unity.exe` from a previous run — usually because the last build was canceled with **Ctrl+C** (or the PowerShell window was killed), leaving orphaned `AssetImportWorker` children that still hold `Temp\UnityLockfile`.
+The project is locked by a leftover `Temp\UnityLockfile` from a previous run that died without cleaning up — Ctrl+C, PowerShell window killed via Task Manager, BSOD, or **Unity itself crashing in native code** (see next entry). With the lockfile present, every Unity batchmode invocation against the project exits ~1 second after start with code 1.
 
-The current `Build-All.ps1` wraps the full flow in `try/finally` and kills the tracked Unity process tree + removes the stale lockfile on exit, so this shouldn't re-occur. If you're on a pre-fix copy or the PowerShell process itself was killed (Task Manager, BSOD), clean up manually:
+The current `Build-All.ps1` does three things to prevent and recover from this:
+
+1. **Preflight scrub** — checks for a stale `Temp\UnityLockfile` at startup and removes it if no live Unity has it locked.
+2. **Outer `try/finally`** — kills the tracked Unity process tree on Ctrl+C / `throw`.
+3. **Always-on lockfile cleanup** — `Stop-AllTrackedUnity` removes `Temp\UnityLockfile` *unconditionally* in the finally, including the case where Unity died on its own (native crash) and there were no tracked PIDs left to kill.
+
+If you're on an older copy of the orchestrator (before the always-on cleanup was added), or if the PowerShell process itself was killed before the finally could run, clean up manually:
 
 ```powershell
 Get-Process Unity -ErrorAction SilentlyContinue | Stop-Process -Force
 Remove-Item 'PATH\TO\YourProject\Temp\UnityLockfile' -Force -ErrorAction SilentlyContinue
 ```
 
-Then re-run the build. If `Get-Process Unity` returns nothing but the lockfile still exists, just delete the lockfile.
+Then re-run. If `Get-Process Unity` returns nothing but the lockfile still exists, just delete the lockfile.
 
 `build_mac.sh` has the same protection — a `trap abort_cleanup INT TERM HUP` walks the descendant process tree (Unity, `AssetImportWorker`, `xcodebuild`, `clang`, `altool`, `steamcmd`) on SIGINT (Ctrl+C via `ssh -t`), SIGHUP (SSH drop), or SIGTERM, and removes `Temp/UnityLockfile`. If a Windows BSOD / power loss prevents the trap from firing, the Mac sshd will detect the dead connection via TCP keepalive (default ~2 hours) and send SIGHUP then. Until then, clean up manually on the Mac:
 
@@ -209,6 +215,38 @@ pkill -f Unity.app
 pkill -f xcodebuild
 rm -f /path/to/your-project/Temp/UnityLockfile
 ```
+
+### Unity crashed in native code (exit `-1073741819` or similar large negative)
+
+Exit codes like `-1073741819`, `-1073741571`, `-1073740940`, `-1073740791` are signed-decimal renderings of Windows NTSTATUS exception codes — `0xC0000005` (access violation), `0xC00000FD` (stack overflow), `0xC0000374` (heap corruption), `0xC0000409` (stack-buffer-overrun / GS-cookie), respectively. They mean Unity itself crashed in native code, not that your build emitted an error. The Unity log usually has no managed stack trace because the fault was below the C# layer; you'll see a `Crash!!!` line followed by a long DLL list and no resolved frames.
+
+Recent versions of `Build-All.ps1` decode these codes into a human-readable label and dump a recovery checklist. Older copies just report the raw integer.
+
+**Where to find the crash dump:**
+
+```
+%TEMP%\Unity\Editor\Crashes\Crash_<TIMESTAMP>\crash.dmp
+```
+
+That directory is timestamped per-crash; the most recent folder is what you want. Open `crash.dmp` in WinDbg (`!analyze -v`) for a real stack trace, or attach it to a Unity bug report.
+
+**Recovery, in order:**
+
+1. **Re-run with `-ClearCache`** — most native crashes during script compile / asset reload are stale-cache desyncs (Burst AOT, Bee, ScriptAssemblies, Temp). The flag nukes those four directories before the next Unity invocation. Adds ~5–15 min for the full reimport.
+
+   ```powershell
+   .\Tools\Build\Build-All.ps1 -ClearCache
+   ```
+
+2. **Confirm `Temp\UnityLockfile` is gone** — the orchestrator's preflight scrub handles this on subsequent runs, but if you're on an older copy, delete it manually (see the previous entry).
+
+3. **If the crash repeats with cleared caches**, you've got a real Unity bug. Open the editor GUI once (any project), then **Help → Report a Bug** and attach the `crash.dmp` + the Unity log path the orchestrator printed. As a workaround, drop to the previous Editor patch version (Unity Hub → Installs → Add → pick the prior `f1`); native crashes that are version-specific usually get fixed in the next patch.
+
+4. **Project-specific suspects worth checking** when the crash reproduces deterministically:
+
+   - **Custom native plugins** — a freshly added `.dll` in `Assets/Plugins/x86_64` can crash the editor on first import if its dependencies don't resolve. Move it out of the project, run, then move it back.
+   - **Asset corruption** — a single broken asset can crash during reimport. `git status` for recently-added binaries; remove and reimport one by one.
+   - **Mismatched plugin manifest vs `current-build/` folder** in EDM4U-style packages (Google Play Games, Firebase, AdMob). Their on-startup `VersionHandler` / `Upgrader` runs every editor launch and has historically taken down whole Editor sessions. If the crash sits right after a `*Upgrader done` log line, that family of plugins is the prime suspect — try deleting the plugin's `current-build/` folder + the EDM4U cache (`Library/PackageCache/com.google.external-dependency-manager*`) and reimporting.
 
 ### `Keystore file not found: ...\game.keystore`
 
