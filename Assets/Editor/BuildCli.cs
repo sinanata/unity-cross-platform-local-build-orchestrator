@@ -28,11 +28,13 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 namespace BuildOrchestrator.Cli
 {
@@ -116,6 +118,8 @@ namespace BuildOrchestrator.Cli
                 }
 
                 EnsureParentDir(buildPath);
+
+                ValidateUiAssets();
 
                 var scenes = GetScenes();
                 Log($"Scenes: {scenes.Length} from EditorBuildSettings.");
@@ -363,5 +367,90 @@ namespace BuildOrchestrator.Cli
                 .Replace("\t", "\\t");
 
         private static void Log(string msg) => Debug.Log($"{LogPrefix} {msg}");
+
+        // -------- UI asset validation --------
+        // Force-reimport every *.uxml / *.uss under Assets/ and fail the build
+        // if any of them logs an error during import. UI Toolkit's importer
+        // reports XML well-formedness errors, unknown elements, attribute parse
+        // failures, and USS syntax errors via Debug.LogError — but does NOT
+        // mark the player build as failed, so a malformed UXML happily ships
+        // and surfaces as a runtime "Failed to clone" or a blank screen.
+        // Adds a few seconds; catches the entire class of bug at the only step
+        // we have before the upload starts.
+        //
+        // No-op for projects that don't use UI Toolkit (no UXML/USS under
+        // Assets/) — runs only if the asset DB finds at least one.
+        private static void ValidateUiAssets()
+        {
+            var paths = new List<string>();
+            paths.AddRange(AssetDatabase.FindAssets("t:VisualTreeAsset")
+                .Select(AssetDatabase.GUIDToAssetPath)
+                .Where(p => !string.IsNullOrEmpty(p) && p.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase)));
+            paths.AddRange(AssetDatabase.FindAssets("t:StyleSheet")
+                .Select(AssetDatabase.GUIDToAssetPath)
+                .Where(p => !string.IsNullOrEmpty(p) && p.EndsWith(".uss", StringComparison.OrdinalIgnoreCase)));
+
+            // Don't validate vendor / Packages trees — package-shipped UXMLs
+            // (Unity samples, third-party assets) aren't ours to gate on.
+            paths = paths
+                .Where(p => p.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (paths.Count == 0)
+            {
+                Log("UI asset validation: no UXML/USS under Assets/, skipping.");
+                return;
+            }
+
+            Log($"UI asset validation: re-importing {paths.Count} UXML/USS files...");
+
+            var failures = new List<string>();
+            var captured = new List<string>();
+            Application.LogCallback handler = (msg, stack, type) =>
+            {
+                if (type == LogType.Error || type == LogType.Exception || type == LogType.Assert)
+                    captured.Add(msg);
+            };
+
+            foreach (var path in paths)
+            {
+                captured.Clear();
+                Application.logMessageReceived += handler;
+                try
+                {
+                    AssetDatabase.ImportAsset(path,
+                        ImportAssetOptions.ForceUpdate | ImportAssetOptions.ForceSynchronousImport);
+                }
+                finally
+                {
+                    Application.logMessageReceived -= handler;
+                }
+
+                bool isUxml = path.EndsWith(".uxml", StringComparison.OrdinalIgnoreCase);
+                UnityEngine.Object asset = isUxml
+                    ? (UnityEngine.Object)AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(path)
+                    : (UnityEngine.Object)AssetDatabase.LoadAssetAtPath<StyleSheet>(path);
+
+                if (asset == null)
+                {
+                    failures.Add($"{path}: importer returned null asset");
+                }
+                else if (captured.Count > 0)
+                {
+                    var unique = captured.Distinct().ToArray();
+                    failures.Add($"{path}: {string.Join(" | ", unique)}");
+                }
+            }
+
+            if (failures.Count > 0)
+            {
+                var msg = $"UI asset validation FAILED for {failures.Count}/{paths.Count} files:\n  - "
+                          + string.Join("\n  - ", failures);
+                throw new Exception(msg);
+            }
+
+            Log($"UI asset validation: {paths.Count} files OK.");
+        }
     }
 }

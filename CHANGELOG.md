@@ -4,6 +4,16 @@ All notable changes to this project will be documented here.
 
 This project loosely follows [Semantic Versioning](https://semver.org/) and uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [1.2.0] — 2026-04-29
+
+### Added
+
+- **Pre-build UXML/USS validation in `BuildCli.cs`.** Before every player build, `ValidateUiAssets()` enumerates every `*.uxml` / `*.uss` under `Assets/`, force-reimports each with `ImportAssetOptions.ForceUpdate | ForceSynchronousImport`, and captures any `LogType.Error` / `Exception` / `Assert` lines that fire during the import via `Application.logMessageReceived`. If any file's import logs an error or returns a null asset, the build aborts with a per-file failure list. UI Toolkit's importer reports XML well-formedness errors, unknown elements, attribute parse failures and USS syntax errors via `Debug.LogError`, but does *not* mark the player build as failed — without this step, a malformed UXML happily ships and surfaces as a runtime "Failed to clone" or a blank screen. Adds a few seconds; catches the entire class of bug at the only step before the upload starts. No-op for projects that don't use UI Toolkit.
+
+### Fixed
+
+- **`deploy_mac.sh` exit-code capture under `set -e`.** `EXIT_CODE=$?` after the `steamcmd` invocation was dead code: with `set -euo pipefail` the script aborts at the failing command and the troubleshooting branch never runs. Switched to `cmd || EXIT_CODE=$?` so SteamCMD failures still produce diagnostics. Added a 42-specific hint when the bare-binary fallback gets used (Valve's self-update relaunch protocol — `MAGIC_RESTART_EXITCODE=42` from the wrapper script).
+
 ## [1.1.1] — 2026-04-25
 
 ### Fixed
