@@ -188,8 +188,18 @@ fi
 echo "Starting SteamCMD upload..."
 echo ""
 
-"$STEAMCMD_PATH" +login "$USERNAME" +run_app_build "$APP_VDF" +quit
-EXIT_CODE=$?
+# `set -e` would kill the script the instant SteamCMD returns non-zero, so
+# `EXIT_CODE=$?` and the troubleshooting block below would be dead code.
+# Capture the exit code explicitly with `|| EXIT_CODE=$?` so the failure
+# path still runs.
+#
+# Note: invoking via steamcmd.sh (preferred above) auto-handles SteamCMD's
+# self-update protocol, where the binary returns MAGIC_RESTART_EXITCODE=42
+# after pulling a new client; the wrapper re-execs itself transparently.
+# When falling back to the bare binary, exit 42 will reach this script and
+# is reported below.
+EXIT_CODE=0
+"$STEAMCMD_PATH" +login "$USERNAME" +run_app_build "$APP_VDF" +quit || EXIT_CODE=$?
 
 # --- Result ---
 echo ""
@@ -212,6 +222,11 @@ else
     echo "  - Check Steam Guard: SteamCMD may need a 2FA code"
     echo "  - Verify credentials: your account needs upload permissions on app $APP_ID"
     echo "  - If auth issues, delete ~/Steam/config/config.vdf and re-authenticate"
+    if [ "$EXIT_CODE" -eq 42 ]; then
+        echo "  - Exit 42 = SteamCMD self-updated and asked to be re-run."
+        echo "    Pass -s ~/Steam/steamcmd.sh (the wrapper) instead of the bare binary,"
+        echo "    or simply re-run this command — the next launch should succeed."
+    fi
     echo ""
     exit $EXIT_CODE
 fi
