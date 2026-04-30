@@ -14,6 +14,7 @@ This project loosely follows [Semantic Versioning](https://semver.org/) and uses
 ### Fixed
 
 - **`deploy_mac.sh` exit-code capture under `set -e`.** `EXIT_CODE=$?` after the `steamcmd` invocation was dead code: with `set -euo pipefail` the script aborts at the failing command and the troubleshooting branch never runs. Switched to `cmd || EXIT_CODE=$?` so SteamCMD failures still produce diagnostics. Added a 42-specific hint when the bare-binary fallback gets used (Valve's self-update relaunch protocol — `MAGIC_RESTART_EXITCODE=42` from the wrapper script).
+- **`upload_play.py` resumable-upload retry on transient network errors.** A single read timeout near the end of a 128 MB AAB upload killed the whole transfer with no retry — the script's only loop just called `req.next_chunk()` and surfaced the first transient socket exception as a fatal exit 3. New `_next_chunk_with_retry` wraps each chunk in up to 6 attempts with exponential backoff (2s → 60s capped) for `socket.timeout`, `ConnectionError`, `ssl.SSLError`, `httplib2.HttpLib2Error`, and HTTP 5xx/429. Resumable uploads keep server-side state, so a retry just continues from the last committed byte. Also reduced default chunk size 20 MB → 8 MB (every chunk now fits comfortably inside the timeout) and bumped the process socket timeout 60s → 300s.
 
 ## [1.1.1] — 2026-04-25
 

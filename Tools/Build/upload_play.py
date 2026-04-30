@@ -22,13 +22,17 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
+import ssl
 import sys
+import time
 import warnings
 from pathlib import Path
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 try:
+    import httplib2
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
@@ -42,6 +46,40 @@ except ImportError:
 
 
 SCOPES = ["https://www.googleapis.com/auth/androidpublisher"]
+
+# Per-chunk transport timeout (seconds). httplib2's default is 60s, which is
+# tight for an 8 MB chunk on a slow uplink — a single stalled flush can trip
+# the read timer mid-stream. 300s covers worst-case home-ISP upload speeds
+# without making real failures linger.
+HTTP_TIMEOUT_SEC = 300
+
+# Resumable upload chunk size. Smaller = more round-trips but each one fits
+# inside the timeout; bigger = fewer round-trips but more bytes at risk on
+# any single retry. 8 MB is the sweet spot for ~100-200 MB AABs over typical
+# residential uplinks.
+CHUNK_SIZE = 8 * 1024 * 1024
+
+# Retryable errors during resumable upload chunks. Socket / SSL timeouts and
+# connection resets are normal for multi-minute uploads — Google's resumable
+# protocol explicitly supports resuming after them, the script just has to
+# call next_chunk() again on the same MediaFileUpload object.
+_TRANSIENT_NETWORK_ERRORS = (
+    socket.timeout,
+    TimeoutError,
+    ConnectionError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+    ssl.SSLError,
+    httplib2.HttpLib2Error,
+    OSError,  # IncompleteRead, "EOF on stream", etc.
+)
+
+
+def _is_retryable_http_error(e: HttpError) -> bool:
+    """5xx and 429 are retryable per Google's resumable-upload guidance."""
+    status = getattr(getattr(e, "resp", None), "status", None)
+    return status is not None and (status >= 500 or status == 429)
 
 
 def _is_draft_app_error(e: HttpError) -> bool:
@@ -72,11 +110,47 @@ def _set_track_release(edits, package: str, edit_id: str, track: str,
     ).execute()
 
 
+def _next_chunk_with_retry(req, max_attempts: int = 6):
+    """Wrap MediaUploadRequest.next_chunk() with exponential backoff for
+    transient network failures. Resumable uploads keep server-side state, so
+    a retry just resumes from where the previous chunk left off — no need to
+    restart the whole upload (the Python client tracks the resume URI on
+    `req` itself).
+
+    Returns (status, response) — same shape as next_chunk().
+    """
+    delay = 2.0
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return req.next_chunk()
+        except HttpError as e:
+            if not _is_retryable_http_error(e) or attempt == max_attempts:
+                raise
+            print(f"  ! Chunk failed with HTTP {e.resp.status} "
+                  f"(attempt {attempt}/{max_attempts}); retrying in "
+                  f"{delay:.0f}s...", flush=True)
+        except _TRANSIENT_NETWORK_ERRORS as e:
+            if attempt == max_attempts:
+                raise
+            print(f"  ! Chunk failed with {type(e).__name__}: {e} "
+                  f"(attempt {attempt}/{max_attempts}); retrying in "
+                  f"{delay:.0f}s...", flush=True)
+        time.sleep(delay)
+        delay = min(delay * 2, 60.0)
+    raise RuntimeError("upload retry loop exited without success or exception")
+
+
 def upload(service_account_path: Path, aab_path: Path, package: str,
            track: str, release_notes: str | None = None) -> int:
     creds = service_account.Credentials.from_service_account_file(
         str(service_account_path), scopes=SCOPES
     )
+    # Override httplib2's default 60s socket timeout. googleapiclient builds
+    # an internal Http() with the default unless we hand it one. Setting the
+    # process-wide default socket timeout affects all sockets the auth
+    # transport opens, which is exactly what we want for an upload-only run.
+    socket.setdefaulttimeout(HTTP_TIMEOUT_SEC)
+
     service = build("androidpublisher", "v3", credentials=creds, cache_discovery=False)
     edits = service.edits()
 
@@ -89,7 +163,7 @@ def upload(service_account_path: Path, aab_path: Path, package: str,
             str(aab_path),
             mimetype="application/octet-stream",
             resumable=True,
-            chunksize=20 * 1024 * 1024,
+            chunksize=CHUNK_SIZE,
         )
         req = edits.bundles().upload(
             packageName=package,
@@ -99,7 +173,7 @@ def upload(service_account_path: Path, aab_path: Path, package: str,
         response = None
         last_pct = -10
         while response is None:
-            status, response = req.next_chunk()
+            status, response = _next_chunk_with_retry(req)
             if status:
                 pct = int(status.progress() * 100)
                 if pct >= last_pct + 10:
