@@ -441,8 +441,68 @@ echo "  Skip uploads: $SKIP_UPLOADS"
 echo "  Clear cache:  $CLEAR_CACHE"
 echo "  Dry run:      $DRY_RUN"
 
+# Detects Unity's Burst-AOT cache-corruption signature in a build log. The
+# fingerprint is `BuildFailedException: Burst compiler (...) failed running`
+# with empty stderr — bcl.exe / bcl-mac exits 3 and writes nothing useful.
+# Real Burst errors (genuine compile failures in user [BurstCompile] code)
+# carry actual stderr and don't match this exact line, so the pattern stays
+# narrow and auto-retry doesn't waste time on real bugs.
+test_burst_cache_failure() {
+    local log_file="$1"
+    [ -f "$log_file" ] || return 1
+    grep -q 'BuildFailedException:[[:space:]]*Burst compiler' "$log_file"
+}
+
+# Surgically clear Library/BurstCache and the per-session Burst job artefacts
+# under Library/Bee. Cheaper than a full --clear-cache: the next run still
+# reuses script assemblies, package cache, and asset import results.
+clear_burst_cache_only() {
+    if [ -d "$REPO_ROOT/Library/BurstCache" ]; then
+        info "Removing $REPO_ROOT/Library/BurstCache"
+        rm -rf "$REPO_ROOT/Library/BurstCache"
+    fi
+    for pat in "$REPO_ROOT/Library/Bee/Burst"* \
+               "$REPO_ROOT/Library/Bee/artifacts"/*PlayerBuildProgram/AsyncPluginsFromLinker*; do
+        [ -e "$pat" ] || continue
+        info "Removing $pat"
+        rm -rf "$pat"
+    done
+}
+
 # ---------- Unity runner ----------
+# Wrapper around _run_unity_once that adds Burst-cache auto-retry: if the
+# build's log contains the cache-corruption signature, scrub BurstCache and
+# re-run ONCE before propagating failure. Either returns 0 or calls `fail`,
+# matching the original run_unity contract so callers' `set -e` aborts cleanly.
 run_unity() {
+    local method="$1"
+    local method_safe
+    method_safe="$(echo "$method" | tr '.' '_')"
+
+    if _run_unity_once "$@"; then return 0; fi
+    local ec=$?
+
+    local last_log
+    last_log="$(ls -t "$OUTPUT_DIR"/unity-"$method_safe"-*.log 2>/dev/null | head -n 1 || true)"
+
+    if [ -n "$last_log" ] && test_burst_cache_failure "$last_log"; then
+        warn "$method hit a Burst-AOT cache failure (bcl exit 3, empty stderr)."
+        warn "Auto-clearing Library/BurstCache and retrying ONCE before failing."
+        if [ "$DRY_RUN" != "true" ]; then
+            clear_burst_cache_only
+        fi
+        if _run_unity_once "$@"; then
+            ok "$method succeeded on Burst-cache retry."
+            return 0
+        fi
+        ec=$?
+        last_log="$(ls -t "$OUTPUT_DIR"/unity-"$method_safe"-*.log 2>/dev/null | head -n 1 || true)"
+    fi
+
+    fail "Unity $method failed (exit $ec). Log: $last_log"
+}
+
+_run_unity_once() {
     local method="$1"
     local build_target="$2"
     shift 2
@@ -477,16 +537,21 @@ run_unity() {
     local ec=$?
     set -e
     if [ $ec -ne 0 ]; then
-        fail "Unity $method failed (exit $ec). Log: $log_file"
+        # Don't `fail` here — the wrapper run_unity needs to see the non-zero
+        # exit so it can decide whether to retry on Burst failure.
+        warn "Unity $method failed (exit $ec). Log: $log_file"
+        return $ec
     fi
 
     if [ -f "$report_file" ] && command -v jq >/dev/null 2>&1; then
         local success
         success="$(jq -r '.success // false' "$report_file")"
         if [ "$success" != "true" ]; then
-            fail "Unity $method reported failure: $(jq -r '.message // "unknown"' "$report_file"). Log: $log_file"
+            warn "Unity $method reported failure: $(jq -r '.message // "unknown"' "$report_file"). Log: $log_file"
+            return 2
         fi
     fi
+    return 0
 }
 
 # ---------- Clear Unity caches (optional, before any Unity build) ----------

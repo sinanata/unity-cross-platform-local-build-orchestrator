@@ -460,12 +460,68 @@ function Get-NativeCrashLabel([int]$ExitCode) {
     }
 }
 
+# Detects Unity's Burst-AOT cache-corruption signature in a build log. The
+# fingerprint is `BuildFailedException: Burst compiler (...) failed running`
+# with empty stderr — bcl.exe exits 3 after ~45s and writes nothing useful.
+# Real Burst errors (genuine compile failures in user [BurstCompile] code)
+# include actual stderr content and don't match this exact line, so the
+# pattern is narrow enough that auto-retry doesn't waste time on real bugs.
+function Test-BurstCacheFailure([string]$LogFile) {
+    if (-not $LogFile -or -not (Test-Path $LogFile)) { return $false }
+    try {
+        $content = Get-Content -LiteralPath $LogFile -Raw -ErrorAction SilentlyContinue
+        if (-not $content) { return $false }
+        return ($content -match 'BuildFailedException:\s*Burst compiler')
+    } catch {
+        return $false
+    }
+}
+
+# Surgically clear Library/BurstCache and the per-session Burst job artefacts
+# under Library/Bee. Cheaper than -ClearCache: the next build still reuses
+# script assemblies, package cache, and asset import results.
+function Clear-BurstCacheOnly([string]$ProjectRoot) {
+    $burst = Join-Path $ProjectRoot "Library\BurstCache"
+    if (Test-Path $burst) {
+        Write-Info "Removing $burst"
+        Remove-Item -Path $burst -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($pat in @("Library\Bee\Burst*", "Library\Bee\artifacts\*PlayerBuildProgram\AsyncPluginsFromLinker*")) {
+        Get-ChildItem -Path (Join-Path $ProjectRoot $pat) -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Write-Info "Removing $($_.FullName)"
+                Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+    }
+}
+
 function Invoke-Unity-OrDie {
     param(
         [string]$UnityExe, [string]$Method, [string]$BuildTarget,
         [string[]]$ExtraArgs, [string]$Label
     )
     $r = Run-Unity -UnityExe $UnityExe -Method $Method -BuildTarget $BuildTarget -ExtraArgs $ExtraArgs
+
+    # Burst-cache auto-retry: scrub BurstCache and run Unity once more if the
+    # specific cache-corruption pattern matches. Skip when Unity native-crashed
+    # (different recovery flow) or when the build genuinely succeeded.
+    $burstFailed = ($r.ExitCode -ne 0) -and `
+                   (-not (Get-NativeCrashLabel $r.ExitCode)) -and `
+                   (Test-BurstCacheFailure $r.LogFile)
+    if ($burstFailed) {
+        Write-Warn "$Label hit a Burst-AOT cache failure (bcl.exe exit 3, empty stderr)."
+        Write-Warn "Auto-clearing Library/BurstCache and retrying ONCE before failing."
+        if (-not $script:DryRun) {
+            Clear-BurstCacheOnly -ProjectRoot $RepoRoot
+        }
+        $r = Run-Unity -UnityExe $UnityExe -Method $Method -BuildTarget $BuildTarget -ExtraArgs $ExtraArgs
+        if ($r.ExitCode -eq 0) {
+            Write-Ok "$Label succeeded on Burst-cache retry."
+        } else {
+            Write-Warn "$Label still failed after Burst-cache clear; falling through to normal failure handling."
+        }
+    }
+
     if ($r.ExitCode -ne 0) {
         $crash = Get-NativeCrashLabel $r.ExitCode
         if ($crash) {

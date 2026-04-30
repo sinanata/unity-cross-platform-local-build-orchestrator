@@ -4,11 +4,12 @@ All notable changes to this project will be documented here.
 
 This project loosely follows [Semantic Versioning](https://semver.org/) and uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
-## [1.2.0] — 2026-04-29
+## [1.2.0] — 2026-04-30
 
 ### Added
 
 - **Pre-build UXML/USS validation in `BuildCli.cs`.** Before every player build, `ValidateUiAssets()` enumerates every `*.uxml` / `*.uss` under `Assets/`, force-reimports each with `ImportAssetOptions.ForceUpdate | ForceSynchronousImport`, and captures any `LogType.Error` / `Exception` / `Assert` lines that fire during the import via `Application.logMessageReceived`. If any file's import logs an error or returns a null asset, the build aborts with a per-file failure list. UI Toolkit's importer reports XML well-formedness errors, unknown elements, attribute parse failures and USS syntax errors via `Debug.LogError`, but does *not* mark the player build as failed — without this step, a malformed UXML happily ships and surfaces as a runtime "Failed to clone" or a blank screen. Adds a few seconds; catches the entire class of bug at the only step before the upload starts. No-op for projects that don't use UI Toolkit.
+- **Burst-AOT cache-corruption auto-retry.** `Build-All.ps1` (`Test-BurstCacheFailure` + `Clear-BurstCacheOnly` + `Invoke-Unity-OrDie` retry) and `build_mac.sh` (`test_burst_cache_failure` + `clear_burst_cache_only` + `run_unity` wrapper) now scan a failed Unity build's log for the `BuildFailedException: Burst compiler (...) failed running` signature. When matched, the orchestrator scrubs `Library/BurstCache` plus the Bee-side Burst job artifacts (`Library/Bee/Burst*`, `Library/Bee/artifacts/*PlayerBuildProgram/AsyncPluginsFromLinker*`) and re-runs Unity *once* before propagating failure. The bcl exit-3 / empty-stderr signature is narrow enough that genuine `[BurstCompile]` errors (which carry actual stderr content) don't auto-retry. Native crashes still flow through the existing native-crash diagnostic path. Replaces the previous "re-run with `-ClearCache`" manual step for what's by far the most common transient failure.
 
 ### Fixed
 
