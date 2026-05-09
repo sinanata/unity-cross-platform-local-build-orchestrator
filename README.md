@@ -1,6 +1,6 @@
 # Unity cross-platform local build orchestrator
 
-One PowerShell command on your Windows PC builds and ships your Unity game to **four platforms** — Windows (Steam), Android (Google Play), iOS (TestFlight), and macOS (Steam) — using a Mac on the same LAN over SSH. Open-sourced as part of a small giving-back set of Unity tools — alongside the [UI Toolkit design system](https://github.com/sinanata/unity-ui-document-design-system) and the [Voronoi mesh fracturer](https://github.com/sinanata/unity-mesh-fracture).
+One PowerShell command on your Windows PC builds and ships your Unity game to **four platforms** — Windows (Steam), Android (Google Play), iOS (TestFlight), and macOS (Steam) — using a Mac on the same LAN over SSH. Plus a **WebGL-only submodule mode** for OSS demos that ship to GitHub Pages. Open-sourced as part of a small giving-back set of Unity tools — alongside the [UI Toolkit design system](https://github.com/sinanata/unity-ui-document-design-system), the [Voronoi mesh fracturer](https://github.com/sinanata/unity-mesh-fracture), and the [3D-to-sprite baker](https://github.com/sinanata/unity-3d-to-sprite-baker).
 
 <blockquote>
 <a href="https://store.steampowered.com/app/2269500/"><img src="docs/leap-of-legends-icon.png" align="left" width="70" height="70" alt="Leap of Legends"></a>
@@ -74,6 +74,83 @@ It's deliberately **local** — no CI/CD, no cloud runners, no paid minutes, no 
 7. **Summary** — every artefact path, upload status, total time.
 
 All output is **colour-coded and progress-animated** — real phase names from Unity's `DisplayProgressbar:` markers and IL2CPP's `[N/M elapsed]` compile counter, not an indeterminate hourglass.
+
+## WebGL submodule mode (OSS demos → GitHub Pages)
+
+If you have a single-platform WebGL demo — like an OSS Unity package's `build → serve → deploy to gh-pages` loop — you don't need keystores, SteamCMD, or a Mac. Drop this repo in as a **git submodule** and call `Build-WebGL.ps1` from a 12-line shim.
+
+```powershell
+# In your OSS repo:
+git submodule add https://github.com/sinanata/unity-cross-platform-local-build-orchestrator Tools/.orchestrator
+```
+
+Your repo's `Tools/Build/Build-Demo.ps1` becomes a forwarding shim:
+
+```powershell
+#Requires -Version 5.1
+param([Parameter(ValueFromRemainingArguments=$true)]$Args)
+$ErrorActionPreference = "Stop"
+$RepoRoot   = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+$ConfigPath = Join-Path $PSScriptRoot "config.local.json"
+$Orch       = Join-Path $RepoRoot "Tools\.orchestrator\Tools\Build\Build-WebGL.ps1"
+& $Orch -Title "Your Demo - WebGL Build" `
+        -UnityMethod "YourNamespace.BuildTools.BuildCli.BuildWebGL" `
+        -LiveUrl "https://you.github.io/your-repo/" `
+        -RepoRoot $RepoRoot -ConfigPath $ConfigPath @Args
+```
+
+The orchestrator handles: stale-lockfile cleanup, process-tree kill on Ctrl+C, live progress display, native-crash labelling, Burst-cache auto-retry, JSON build report, optional `npx serve` smoke test, optional gh-pages force-push (single-commit orphan branch via worktree). Same hardening as the multi-platform flow, scoped to WebGL.
+
+Every consumer keeps its own `Assets/Editor/BuildCli.cs` (project-local: scene path, WebGL template name, namespace) and its own `Tools/Build/config.local.json` (gitignored: Unity path, build dir, deploy creds).
+
+**Reference consumers using this submodule:**
+
+- [unity-3d-to-sprite-baker](https://github.com/sinanata/unity-3d-to-sprite-baker)
+- [unity-mesh-fracture](https://github.com/sinanata/unity-mesh-fracture)
+- [unity-ui-document-design-system](https://github.com/sinanata/unity-ui-document-design-system)
+
+```powershell
+# Daily usage from a consumer:
+.\Tools\Build\Build-Demo.ps1                # build only
+.\Tools\Build\Build-Demo.ps1 -Serve         # build + npx serve for smoke test
+.\Tools\Build\Build-Demo.ps1 -Deploy        # build + force-push to gh-pages
+.\Tools\Build\Build-Demo.ps1 -Deploy -Yes   # CI-style (no prompts)
+.\Tools\Build\Build-Demo.ps1 -ClearCache    # nuke Library/BurstCache + Bee + Temp
+.\Tools\Build\Build-Demo.ps1 -DryRun        # print every command, execute nothing
+```
+
+`Build-WebGL.ps1` parameters:
+
+```
+-Title           Banner shown at startup ("Your Demo - WebGL Build")
+-UnityMethod     Fully-qualified static method (-executeMethod target)
+-LiveUrl         Public URL printed in the summary when -Deploy is used
+-RepoRoot        Consumer's repo root (where Library/, Temp/, .git live)
+-ConfigPath      Path to consumer's config.local.json
+-Serve           After build, npx serve build/WebGL on the configured port
+-Deploy          After build, push artefacts to gh-pages (force, single-commit)
+-ClearCache      Wipe Library/BurstCache, Library/Bee, ScriptAssemblies, Temp
+-DryRun          Print every command without executing it
+-Yes             Skip the plan-confirmation + force-push prompts
+```
+
+The consumer's `config.local.json` for WebGL mode is small:
+
+```json
+{
+    "unity": {
+        "windowsEditorPath": "C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.8f1\\Editor\\Unity.exe",
+        "clearCacheBeforeBuild": false
+    },
+    "paths": { "buildDir": "build/WebGL" },
+    "deploy": {
+        "remoteName": "origin",
+        "branchName": "gh-pages",
+        "commitMessage": "deploy demo ({sha})"
+    },
+    "serve": { "port": 3000 }
+}
+```
 
 ## Requirements
 
