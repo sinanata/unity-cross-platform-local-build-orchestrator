@@ -4,6 +4,16 @@ All notable changes to this project will be documented here.
 
 This project loosely follows [Semantic Versioning](https://semver.org/) and uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
+## [1.2.1] — 2026-05-12
+
+### Added
+
+- **Steam macOS upload watchdog + HTTP-401 auto-retry.** `deploy_mac.sh` wraps the `steamcmd` invocation in a wall-clock watchdog (`STEAM_TIMEOUT_SEC`, default 1800s) and a 401-aware retry. Why: steamcmd has no internal upload timeout — on `HTTP 401` from Valve's content CDN during the depot manifest pre-fetch, it prints a `.` every ~11s and silently retries forever until something else kills it. Observed in the wild as a `build_mac.sh` blocked for ~10 minutes before steamcmd gave up on its own, with no actionable signal in stdout. The 401 itself is recoverable: it's almost always a stale entry in `~/Library/Application Support/Steam/depotcache/` referencing a manifest the CDN no longer serves under the current session's CDN token. `run_steamcmd_once` tees the transcript to `Tools/Steam/output/steamcmd_mac_*.log`; on failure, `is_manifest_401_failure` greps for `Failed to download manifest ... (HTTP 401)` and, if matched, calls `clear_depotcache` and re-runs once (`*.retry.log`). The watchdog uses `pkill -P $$ -f steamcmd` so it only reaps descendants of the deploy script — never an unrelated Steam client the user might have open on the GUI.
+
+### Fixed
+
+- **`xcodebuild` / `xcrun altool` `log stream` orphans now reaped.** Both tools spawn `log stream --predicate process contains "(Xcode|altool)" and subsystem == "com.apple.network"` helpers for their own network diagnostics. The helpers re-parent to `launchd` (PPID=1) the moment the spawning tool exits, so `_list_descendants $$` in `abort_cleanup` missed them — they'd accumulate across builds, harmless but ugly. Added `reap_apple_network_log_orphans` (predicate-specific `pkill`, idempotent) called from both the normal-exit tail of `build_mac.sh` and from `abort_cleanup`.
+
 ## [1.2.0] — 2026-04-30
 
 ### Added

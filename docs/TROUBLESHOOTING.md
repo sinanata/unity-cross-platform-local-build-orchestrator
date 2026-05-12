@@ -385,6 +385,23 @@ The Steam user account in config doesn't have build-upload permission on this ap
 
 The tool generates VDFs at runtime from your config. If you see a VDF parse error, check that `steam.appId`, `steam.depotIdWindows`, `steam.depotIdMacOS` are numeric strings (e.g. `"123456"`, not `"game123456"`).
 
+### macOS Steam upload hangs ~10 minutes then `Build for depot X failed`
+
+`steamcmd` hit `HTTP 401` while pre-fetching the previous depot's manifest from Valve's content CDN and silently retried (a `.` every ~11s in `~/Library/Application Support/Steam/logs/console_log.txt`) until it gave up. Almost always a stale entry in `~/Library/Application Support/Steam/depotcache/` referencing a manifest the CDN no longer serves under the current session's token.
+
+`deploy_mac.sh` detects this case automatically: on `Failed to download manifest ... (HTTP 401)` it clears `depotcache` and retries once. It also enforces a wall-clock timeout (env `STEAM_TIMEOUT_SEC`, default 1800s) so a stuck `steamcmd` can't block the orchestrator longer than 30 min. The full transcript is captured to `Tools/Steam/output/steamcmd_mac_*.log` for diagnosis (the auto-retry variant is `*.retry.log`).
+
+If both attempts still fail, clear depotcache manually and re-run the macOS-only path:
+
+```bash
+rm -rf "$HOME/Library/Application Support/Steam/depotcache"
+ssh youruser@yourmac '~/.../Tools/Build/build_mac.sh --skip-ios'
+```
+
+### `xcodebuild` / `altool` left `log stream` processes running after build
+
+macOS's `xcodebuild` and `xcrun altool` spawn `log stream --predicate ... subsystem == "com.apple.network"` helpers for their own network diagnostics. They re-parent to `launchd` the moment the spawning tool exits, so a naive descendant walk in `build_mac.sh`'s `abort_cleanup` missed them. The current tool reaps them by predicate signature both on normal exit and abort. If you find stragglers anyway, `pkill -f 'log stream --predicate process contains "(Xcode|altool)" and subsystem == "com.apple.network"'`.
+
 ---
 
 ## General

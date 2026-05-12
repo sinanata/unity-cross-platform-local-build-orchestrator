@@ -185,21 +185,102 @@ if [ "$PREVIEW" = false ] && [ "$YES" = false ]; then
 fi
 
 # --- Execute SteamCMD ---
-echo "Starting SteamCMD upload..."
-echo ""
-
-# `set -e` would kill the script the instant SteamCMD returns non-zero, so
-# `EXIT_CODE=$?` and the troubleshooting block below would be dead code.
-# Capture the exit code explicitly with `|| EXIT_CODE=$?` so the failure
-# path still runs.
+# Wrapped in a watchdog + HTTP-401 auto-retry. Why:
+#
+#  1. steamcmd has NO internal upload timeout. On HTTP 401 from the
+#     steampipe CDN (during the depot manifest pre-fetch), it just
+#     prints a `.` every ~11s and silently retries forever until
+#     something else kills it. Observed in the wild as a build_mac.sh
+#     blocked for ~10 minutes before steamcmd gave up on its own.
+#     A wall-clock watchdog gives the orchestrator a bounded failure.
+#
+#  2. The 401 itself is recoverable: it's almost always a stale entry
+#     in `~/Library/Application Support/Steam/depotcache/` referencing
+#     a manifest the CDN no longer serves under the current session's
+#     CDN token. Clearing depotcache (fully regenerable, does NOT touch
+#     auth tokens in `config/`) and re-running once is the fix.
 #
 # Note: invoking via steamcmd.sh (preferred above) auto-handles SteamCMD's
 # self-update protocol, where the binary returns MAGIC_RESTART_EXITCODE=42
 # after pulling a new client; the wrapper re-execs itself transparently.
 # When falling back to the bare binary, exit 42 will reach this script and
 # is reported below.
+
+echo "Starting SteamCMD upload..."
+echo ""
+
+# Override default with STEAM_TIMEOUT_SEC env var.
+STEAM_TIMEOUT_SEC="${STEAM_TIMEOUT_SEC:-1800}"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+STEAMCMD_LOG="$OUTPUT_DIR/steamcmd_mac_${STAMP}.log"
+STEAMCMD_RETRY_LOG="$OUTPUT_DIR/steamcmd_mac_${STAMP}.retry.log"
+
+# Spawn a watchdog that kills the steamcmd subtree if it runs past the
+# timeout. `pkill -P $$` confines the kill to descendants of *this*
+# script (steamcmd.sh wrapper -> steamcmd binary), so we never reap an
+# unrelated Steam client the user might have running on the GUI.
+# `2>&1 | tee` captures the same output we'd normally see on stdout
+# AND writes it to a log file we can grep for the 401 pattern below.
+# PIPESTATUS[0] is the exit code of steamcmd itself (not tee).
+run_steamcmd_once() {
+    local log_file="$1"
+
+    (
+        sleep "$STEAM_TIMEOUT_SEC"
+        if pgrep -P $$ -f steamcmd >/dev/null 2>&1; then
+            echo "" >> "$log_file"
+            echo "[deploy_mac.sh] WATCHDOG: ${STEAM_TIMEOUT_SEC}s wall-clock timeout — killing steamcmd subtree." >> "$log_file"
+            pkill -TERM -P $$ -f steamcmd 2>/dev/null
+            sleep 2
+            pkill -KILL -P $$ -f steamcmd 2>/dev/null
+        fi
+    ) &
+    local wd_pid=$!
+
+    set +e
+    "$STEAMCMD_PATH" +login "$USERNAME" +run_app_build "$APP_VDF" +quit 2>&1 | tee "$log_file"
+    local rc=${PIPESTATUS[0]}
+    set -e
+
+    kill "$wd_pid" 2>/dev/null
+    wait "$wd_pid" 2>/dev/null || true
+
+    return $rc
+}
+
+# Recognises the specific pattern that triggers infinite retries.
+# Real auth failures (wrong password, account lacks app permission)
+# fail-fast with different messages and don't match.
+is_manifest_401_failure() {
+    local log_file="$1"
+    [ -f "$log_file" ] || return 1
+    grep -qE 'Failed to download manifest.*\(HTTP 401\)' "$log_file"
+}
+
+clear_depotcache() {
+    local cache="$HOME/Library/Application Support/Steam/depotcache"
+    if [ -d "$cache" ]; then
+        local size
+        size="$(du -sh "$cache" 2>/dev/null | cut -f1)"
+        echo "  [..] Clearing Steam depotcache (${size:-?})"
+        rm -rf "$cache"
+    fi
+}
+
 EXIT_CODE=0
-"$STEAMCMD_PATH" +login "$USERNAME" +run_app_build "$APP_VDF" +quit || EXIT_CODE=$?
+run_steamcmd_once "$STEAMCMD_LOG" || EXIT_CODE=$?
+
+if [ "$EXIT_CODE" -ne 0 ] && is_manifest_401_failure "$STEAMCMD_LOG"; then
+    echo ""
+    echo "  [WARN] steamcmd hit HTTP 401 on a depot manifest download."
+    echo "  [WARN] Clearing Steam depotcache and retrying ONCE."
+    clear_depotcache
+    EXIT_CODE=0
+    run_steamcmd_once "$STEAMCMD_RETRY_LOG" || EXIT_CODE=$?
+    if [ "$EXIT_CODE" -eq 0 ]; then
+        echo "  [OK]   Steam upload succeeded on depotcache-cleared retry."
+    fi
+fi
 
 # --- Result ---
 echo ""
@@ -221,7 +302,13 @@ else
     echo "Troubleshooting:"
     echo "  - Check Steam Guard: SteamCMD may need a 2FA code"
     echo "  - Verify credentials: your account needs upload permissions on app $APP_ID"
+    echo "  - Full steamcmd transcript: $OUTPUT_DIR/steamcmd_mac_*.log"
+    echo "    (the *.retry.log variant exists if the 401 auto-retry path ran)"
     echo "  - If auth issues, delete ~/Steam/config/config.vdf and re-authenticate"
+    echo "  - If WATCHDOG fired (search the log), the upload was killed for"
+    echo "    running past STEAM_TIMEOUT_SEC (default 1800s). Re-run after"
+    echo "    investigating whatever stalled — Valve CDN issue, network, or"
+    echo "    unexpectedly large depot."
     if [ "$EXIT_CODE" -eq 42 ]; then
         echo "  - Exit 42 = SteamCMD self-updated and asked to be re-run."
         echo "    Pass -s ~/Steam/steamcmd.sh (the wrapper) instead of the bare binary,"

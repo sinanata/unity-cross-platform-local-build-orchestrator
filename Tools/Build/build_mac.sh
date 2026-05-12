@@ -75,6 +75,12 @@ abort_cleanup() {
         kill -KILL $descendants 2>/dev/null
     fi
 
+    # xcodebuild and xcrun altool spawn `log stream --predicate ...
+    # subsystem == "com.apple.network"` helpers that re-parent to launchd
+    # the moment the spawning tool exits, so the descendant walk above
+    # misses them. Reap by predicate signature.
+    reap_apple_network_log_orphans
+
     # Unity holds Temp/UnityLockfile while running; killing it leaves the
     # lockfile behind and blocks the next batchmode run.
     if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/Temp/UnityLockfile" ]; then
@@ -84,6 +90,14 @@ abort_cleanup() {
 
     # 130 = conventional SIGINT exit; close enough for all three signals.
     exit 130
+}
+
+# Kill orphaned `log stream` helpers that xcodebuild / altool leave behind.
+# Their predicate string is specific enough that this won't false-positive on
+# any `log stream` the user might legitimately have running themselves.
+# Idempotent and silent on no-match.
+reap_apple_network_log_orphans() {
+    pkill -f 'log stream --predicate process contains "(Xcode|altool)" and subsystem == "com.apple.network"' 2>/dev/null || true
 }
 
 trap abort_cleanup INT TERM HUP
@@ -701,3 +715,7 @@ fi
 section "build_mac.sh done"
 [ "$SKIP_IOS"   = "true" ] && echo "iOS:   skipped"  || echo "iOS:   $IOS_BUILD_DIR"
 [ "$SKIP_MACOS" = "true" ] && echo "macOS: skipped"  || echo "macOS: $MAC_BUILD_DIR"
+
+# Reap the xcodebuild/altool log-stream helpers on success too. abort_cleanup
+# already covers the SIGINT / SIGHUP / SIGTERM paths.
+reap_apple_network_log_orphans
