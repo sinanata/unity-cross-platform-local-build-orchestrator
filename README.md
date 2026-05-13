@@ -1,6 +1,6 @@
 # Unity cross-platform local build orchestrator
 
-One PowerShell command on your Windows PC builds and ships your Unity game to **four platforms** — Windows (Steam), Android (Google Play), iOS (TestFlight), and macOS (Steam) — using a Mac on the same LAN over SSH. Plus a **WebGL-only submodule mode** for OSS demos that ship to GitHub Pages. Open-sourced as part of a small giving-back set of Unity tools — alongside the [UI Toolkit design system](https://github.com/sinanata/unity-ui-document-design-system), the [Voronoi mesh fracturer](https://github.com/sinanata/unity-mesh-fracture), and the [3D-to-sprite baker](https://github.com/sinanata/unity-3d-to-sprite-baker).
+One PowerShell command on your Windows PC builds and ships your Unity game to **four platforms** — Windows (Steam), Android (Google Play), iOS (TestFlight), and macOS (Steam) — using a Mac on the same LAN over SSH. Plus a **WebGL-only submodule mode** for OSS demos that ship to GitHub Pages. Open-sourced as part of a small giving-back set of Unity tools — alongside the [UI Toolkit design system](https://github.com/sinanata/unity-ui-document-design-system), the [Voronoi mesh fracturer](https://github.com/sinanata/unity-mesh-fracture), the [3D-to-sprite baker](https://github.com/sinanata/unity-3d-to-sprite-baker), and the [prefab-thumbnail renderer](https://github.com/sinanata/unity-prefab-thumbnail-renderer).
 
 <blockquote>
 <a href="https://store.steampowered.com/app/2269500/"><img src="docs/leap-of-legends-icon.png" align="left" width="70" height="70" alt="Leap of Legends"></a>
@@ -107,6 +107,7 @@ Every consumer keeps its own `Assets/Editor/BuildCli.cs` (project-local: scene p
 
 - [unity-3d-to-sprite-baker](https://github.com/sinanata/unity-3d-to-sprite-baker)
 - [unity-mesh-fracture](https://github.com/sinanata/unity-mesh-fracture)
+- [unity-prefab-thumbnail-renderer](https://github.com/sinanata/unity-prefab-thumbnail-renderer)
 - [unity-ui-document-design-system](https://github.com/sinanata/unity-ui-document-design-system)
 
 ```powershell
